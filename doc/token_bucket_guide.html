@@ -1,0 +1,901 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>dem_buck — 令牌桶流控发包器 原理与使用说明</title>
+<style>
+  :root{
+    --bg:#ffffff; --fg:#1f2328; --muted:#656d76; --line:#d1d9e0;
+    --code-bg:#f6f8fa; --accent:#0969da; --warn-bg:#fff8c5; --warn-line:#d4a72c;
+    --ok-bg:#dafbe1; --ok-line:#2da44e; --bad-bg:#ffebe9; --bad-line:#cf222e;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0; padding:0 24px 80px;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans",
+                "PingFang SC","Microsoft YaHei",Helvetica,Arial,sans-serif;
+    font-size:16px; line-height:1.7; color:var(--fg); background:var(--bg);
+  }
+  .wrap{max-width:900px; margin:0 auto}
+  header{padding:48px 0 24px; border-bottom:1px solid var(--line); margin-bottom:8px}
+  h1{font-size:30px; margin:0 0 8px; font-weight:600; letter-spacing:-.3px}
+  .sub{color:var(--muted); font-size:15px}
+  h2{
+    font-size:23px; font-weight:600; margin:48px 0 16px;
+    padding-bottom:8px; border-bottom:1px solid var(--line);
+  }
+  h3{font-size:18px; font-weight:600; margin:32px 0 12px}
+  h4{font-size:16px; font-weight:600; margin:24px 0 8px}
+  p{margin:12px 0}
+  code{
+    font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,
+                "Liberation Mono",monospace;
+    font-size:85%; background:var(--code-bg); padding:.2em .4em;
+    border-radius:6px; white-space:nowrap;
+  }
+  pre{
+    background:var(--code-bg); border-radius:6px; padding:16px;
+    overflow-x:auto; margin:16px 0; line-height:1.5;
+  }
+  pre code{background:none; padding:0; font-size:13.5px; white-space:pre}
+  table{border-collapse:collapse; width:100%; margin:16px 0; font-size:14.5px; display:block; overflow-x:auto}
+  th,td{border:1px solid var(--line); padding:7px 13px; text-align:left}
+  th{background:var(--code-bg); font-weight:600}
+  td.num{text-align:right; font-family:ui-monospace,Consolas,monospace; white-space:nowrap}
+  .note,.warn,.good{
+    padding:12px 16px; margin:16px 0; border-radius:6px;
+    border-left:4px solid var(--accent); background:#ddf4ff;
+  }
+  .warn{border-left-color:var(--warn-line); background:var(--warn-bg)}
+  .good{border-left-color:var(--ok-line); background:var(--ok-bg)}
+  .note p:first-child,.warn p:first-child,.good p:first-child{margin-top:0}
+  .note p:last-child,.warn p:last-child,.good p:last-child{margin-bottom:0}
+  ul,ol{padding-left:26px; margin:12px 0}
+  li{margin:5px 0}
+  .tag{
+    display:inline-block; padding:1px 8px; border-radius:20px; font-size:12px;
+    font-weight:600; vertical-align:middle;
+  }
+  .tag-ok{background:var(--ok-bg); color:#116329; border:1px solid var(--ok-line)}
+  .tag-bad{background:var(--bad-bg); color:#a40e26; border:1px solid var(--bad-line)}
+  .formula{
+    background:var(--code-bg); border:1px solid var(--line); border-radius:6px;
+    padding:14px 18px; margin:16px 0; text-align:center;
+    font-family:ui-monospace,Consolas,monospace; font-size:15px; overflow-x:auto;
+  }
+  .fileref{font-family:ui-monospace,Consolas,monospace; font-size:13px; color:var(--muted)}
+  hr{border:0; border-top:1px solid var(--line); margin:40px 0}
+  .diagram{
+    background:var(--code-bg); border:1px solid var(--line); border-radius:6px;
+    padding:18px; margin:16px 0; overflow-x:auto;
+    font-family:ui-monospace,Consolas,monospace; font-size:13px; line-height:1.5;
+    white-space:pre;
+  }
+  footer{margin-top:56px; padding-top:20px; border-top:1px solid var(--line); color:var(--muted); font-size:13.5px}
+
+  /* ---------- 侧边导航 ---------- */
+  h2,h3{scroll-margin-top:24px}
+  #nav{
+    position:fixed; top:0; left:0; width:264px; height:100vh;
+    overflow-y:auto; padding:28px 14px 40px;
+    background:var(--code-bg); border-right:1px solid var(--line);
+    font-size:13.5px; line-height:1.5; z-index:20;
+  }
+  #nav .nav-title{
+    font-weight:600; font-size:14px; color:var(--fg);
+    padding:0 10px 12px; margin-bottom:10px; border-bottom:1px solid var(--line);
+  }
+  #nav .nav-title span{display:block; font-weight:400; font-size:12px; color:var(--muted); margin-top:2px}
+  #nav a{
+    display:block; padding:5px 10px; margin:1px 0; border-radius:6px;
+    color:var(--muted); text-decoration:none; border-left:3px solid transparent;
+  }
+  #nav a.lv2{color:var(--fg)}
+  #nav a.lv3{padding-left:24px; font-size:13px}
+  #nav a:hover{background:#eaeef2; color:var(--accent)}
+  #nav a.active{
+    background:#ddf4ff; color:var(--accent); font-weight:600;
+    border-left-color:var(--accent);
+  }
+  /* 有侧栏时正文整体右移 */
+  body.has-nav .wrap{margin-left:264px}
+  #nav-toggle{
+    display:none; position:fixed; top:12px; left:12px; z-index:30;
+    width:38px; height:38px; border:1px solid var(--line); border-radius:6px;
+    background:var(--bg); color:var(--fg); font-size:17px; line-height:1;
+    cursor:pointer;
+  }
+  @media (max-width:1180px){
+    #nav{transform:translateX(-100%); transition:transform .2s ease}
+    #nav.open{transform:none; box-shadow:0 0 0 100vmax rgba(0,0,0,.25)}
+    body.has-nav .wrap{margin-left:0}
+    #nav-toggle{display:block}
+    header{padding-top:60px}
+  }
+</style>
+</head>
+<body class="has-nav">
+
+<button id="nav-toggle" title="目录">☰</button>
+
+<nav id="nav">
+  <div class="nav-title">dem_buck<span>令牌桶流控发包器</span></div>
+  <a class="lv2" href="#1">1. 它解决什么问题</a>
+  <a class="lv2" href="#2">2. 令牌桶原理</a>
+  <a class="lv2" href="#3">3. 实现：虚拟时间 vs 令牌计数</a>
+  <a class="lv2" href="#4">4. 三个易错点与对应设计</a>
+  <a class="lv3" href="#4-1">4.1 超桶深的包不能截断计费</a>
+  <a class="lv3" href="#4-2">4.2 符合性须覆盖任意窗口</a>
+  <a class="lv3" href="#4-3">4.3 等待不能持锁</a>
+  <a class="lv2" href="#5">5. 速率测量：raw / steady / 符合性</a>
+  <a class="lv3" href="#5-1">raw 误差为何可能很大</a>
+  <a class="lv2" href="#6">6. 总线协议：多 beat 传输</a>
+  <a class="lv3" href="#6-1">信号定义</a>
+  <a class="lv3" href="#6-2">时序约定</a>
+  <a class="lv3" href="#6-3">DUT 行为</a>
+  <a class="lv3" href="#6-4">包内 beat 空隙</a>
+  <a class="lv2" href="#7">7. 代码结构</a>
+  <a class="lv3" href="#7-1">关键类</a>
+  <a class="lv2" href="#8">8. 使用说明</a>
+  <a class="lv3" href="#8-1">8.1 环境准备</a>
+  <a class="lv3" href="#8-2">8.2 常用命令</a>
+  <a class="lv3" href="#8-3">8.3 可配变量</a>
+  <a class="lv3" href="#8-4">8.4 testcase 一览</a>
+  <a class="lv2" href="#9">9. 如何自定义</a>
+  <a class="lv3" href="#9-1">9.1 改速率 / 桶深</a>
+  <a class="lv3" href="#9-2">9.2 控带宽 → 控包率</a>
+  <a class="lv3" href="#9-3">9.3 加包长约束</a>
+  <a class="lv3" href="#9-4">9.4 多流共享总带宽</a>
+  <a class="lv3" href="#9-5">9.5 加包内空隙</a>
+  <a class="lv2" href="#10">10. 回归结果</a>
+  <a class="lv2" href="#11">11. 已知限制</a>
+  <a class="lv2" href="#A">附录 A. token_bucket 源码详解</a>
+  <a class="lv3" href="#A-1">A.1 状态变量</a>
+  <a class="lv3" href="#A-2">A.2 configure()</a>
+  <a class="lv3" href="#A-3">A.3 换算与开销校验</a>
+  <a class="lv3" href="#A-4">A.4 consume() 逐段</a>
+  <a class="lv3" href="#A-5">A.5 account()</a>
+  <a class="lv3" href="#A-6">A.6 try_consume()</a>
+  <a class="lv3" href="#A-7">A.7 current_tokens()</a>
+  <a class="lv3" href="#A-8">A.8 三个速率函数的分母</a>
+  <a class="lv3" href="#A-9">A.9 print_stats 字段</a>
+  <a class="lv3" href="#A-10">A.10 使用约束</a>
+</nav>
+
+<div class="wrap">
+
+<header>
+  <h1>dem_buck — 基于令牌桶的 UVM 流控发包器</h1>
+  <div class="sub">原理与使用说明 · GCRA 虚拟时间实现 · VCS 2020.12sp2 + UVM</div>
+</header>
+
+<h2 id="1">1. 它解决什么问题</h2>
+
+<p>验证环境里经常需要「按指定速率发包」：构造背压、复现带宽瓶颈、测下游 FIFO 水位。朴素做法是在 sequence 里插固定延时，但这样做有两个缺陷：无法表达突发行为，且包长变化时实际带宽会漂移。</p>
+
+<p>本 demo 用令牌桶（token bucket）做流量整形，提供两个可独立配置的旋钮：</p>
+
+<ul>
+  <li><strong>速率 R</strong> — 控制长期平均带宽</li>
+  <li><strong>桶深 B</strong> — 控制允许的瞬时突发量</li>
+</ul>
+
+<p>计费单位由调用方决定：<code>item_cost()</code> 返回包长则 R 的单位是 byte/s，返回 <code>1.0</code> 则单位是 packet/s。同一套代码既能控带宽也能控包率。</p>
+
+<h2 id="2">2. 令牌桶原理</h2>
+
+<p>设想一个容量为 B 的桶，令牌以恒定速率 R 注入，溢出部分丢弃。每个包发送前须取走 <code>cost</code> 个令牌；不足则等待。</p>
+
+<div class="diagram">     R token/s
+         │
+         ▼
+   ┌───────────┐
+   │ ░░░░░░░░░ │  ← 桶深 B（溢出即弃）
+   │ ░░░░░░░░░ │
+   └─────┬─────┘
+         │ 取 cost 个令牌
+         ▼
+   ┌───────────┐
+   │   发包    │  令牌不足 → 等待
+   └───────────┘</div>
+
+<p>由此得到两条性质，也是令牌桶的全部契约：</p>
+
+<div class="formula">任意窗口 T 内的放行量：&nbsp; cost(T) ≤ R·T + B</div>
+
+<ul>
+  <li><strong>长期平均速率收敛到 R</strong>。B 是一次性常数，<code>T→∞</code> 时 <code>B/T→0</code>。</li>
+  <li><strong>瞬时突发上限为 B</strong>。桶满时可一次性放行 B 个令牌的流量，这是特性而非缺陷。</li>
+</ul>
+
+<div class="note">
+<p><strong>桶深怎么选。</strong>B 决定了「攒多久的额度能一次放出去」，时间尺度是 <code>B/R</code>。例如 R=2 MB/s、B=8192 B，则 <code>B/R = 4.1 ms</code> —— 意味着约 4 ms 的额度可以瞬间释放。想测稳态就把 B 设小、<code>init_tokens=0</code>；想压下游缓存就把 B 设大。</p>
+</div>
+
+<h2 id="3">3. 实现：为什么用虚拟时间而非令牌计数</h2>
+
+<p>直观实现是维护一个 <code>tokens</code> 变量，按经过时间累加、按开销扣减，不足时循环等待。本 demo 不这样做，而是维护 <strong>TAT</strong>（Theoretical Arrival Time，理论到达时间），即 GCRA（Generic Cell Rate Algorithm）。两者严格等价：</p>
+
+<div class="formula">tokens(t) = B − (TAT − t) · R</div>
+
+<p>于是「令牌足够」的判据可以改写成纯时间比较：</p>
+
+<div class="formula">tokens ≥ cost &nbsp;⟺&nbsp; t ≥ TAT − (B − cost)/R</div>
+
+<p>右侧即该包的<strong>最早放行时刻</strong>，可一次闭式算出。核心代码只有四行：</p>
+
+<pre><code>t_ns        = real'($realtime);
+earliest_ns = tat_ns - tok2ns(cfg.bucket_size - need);
+start_ns    = (earliest_ns > t_ns) ? earliest_ns : t_ns;
+tat_ns      = ((start_ns > tat_ns) ? start_ns : tat_ns) + tok2ns(need);</code></pre>
+
+<p>相比令牌计数法的收益：</p>
+
+<table>
+<thead><tr><th>方面</th><th>令牌计数 + 循环等待</th><th>GCRA 虚拟时间</th></tr></thead>
+<tbody>
+<tr><td>等待时间计算</td><td><code>while</code> 循环逐次逼近</td><td>一次闭式求解，无循环</td></tr>
+<tr><td>浮点误差</td><td>反复累加 + 上限裁剪，会漂移</td><td>TAT 只按精确 <code>cost/R</code> 递增</td></tr>
+<tr><td>边界兜底</td><td>需 <code>if (wait &lt; 0.001)</code> 防零延时死循环</td><td>不需要</td></tr>
+<tr><td>仿真开销</td><td>每包可能多次唤醒</td><td>每包最多一次 <code>#delay</code></td></tr>
+</tbody>
+</table>
+
+<p>另外全程不起后台 <code>forever</code> 线程 —— 令牌是「按需惰性计算」的，空闲时零仿真开销。</p>
+
+<h2 id="4">4. 三个易错点与对应设计</h2>
+
+<h3 id="4-1">4.1 超桶深的包不能截断计费</h3>
+
+<p>当 <code>cost &gt; B</code> 时，若把开销截断为 B 再计费，大包就会<strong>少收费</strong>，长期速率会高于配置值 —— 整形器失守。</p>
+
+<p>本实现<strong>按实际开销计费</strong>，不做截断。GCRA 下这天然成立：<code>cost</code> 越大，<code>TAT</code> 推得越远，该包自己承担更长等待，速率自动摊平。<code>allow_oversize=0</code> 时则报 fatal。</p>
+
+<h3 id="4-2">4.2 符合性检查必须覆盖任意窗口</h3>
+
+<p>契约要求 <code>cost ≤ R·T + B</code> 对<strong>任意</strong>窗口成立。若只以首包时刻为起点检查一个窗口，会漏掉「中途空闲、随后突发」的情况。</p>
+
+<p>令 <code>f(t) = cost(t) − R·t</code>，则任意窗口的超额为 <code>f(t₂) − f(t₁)</code>，其最大值是 <code>f(t) − min(f)</code>。因此需跟踪 <code>f</code> 的 running 最小值，代价是 O(1)：</p>
+
+<pre><code>f_before = total_cost - span_s * rate;
+if (f_before &lt; f_min) f_min = f_before;      // running 最小值
+
+total_cost += add_cost;
+
+f_after = total_cost - span_s * rate;
+if ((f_after - f_min) &gt; max_excess)
+    max_excess = f_after - f_min;             // 实际用掉的突发信用</code></pre>
+
+<p>报告里的 <code>burst used</code> 就是这个 <code>max_excess</code>，它必须 ≤ 桶深。</p>
+
+<h3 id="4-3">4.3 等待不能持锁</h3>
+
+<p>多条 sequence 共享一个桶时需用 <code>semaphore</code> 串行化，但若在持锁期间执行 <code>#delay</code>，一条流等令牌会<strong>锁住整个桶</strong>，造成队头阻塞。而且 SV <code>semaphore</code> 的唤醒顺序并非 LRM 保证的 FIFO。</p>
+
+<p>解法是把临界区压到 O(1)：<strong>锁内原子预约时隙，锁外等待</strong>。</p>
+
+<pre><code>sem.get(1);
+  // ... 计算 start_ns, 推进 tat_ns（纯运算，不消耗仿真时间）
+sem.put(1);
+
+delay_ns = start_ns - t_ns;
+if (delay_ns &gt; 0.0) #(delay_ns * 1ns);   // 锁外等待</code></pre>
+
+<p>总速率不受影响，且请求按到达顺序拿到时隙 —— 真正的 FIFO 整形。</p>
+
+<h2 id="5">5. 速率测量：raw、steady 与符合性</h2>
+
+<p>这是最容易产生误解的部分。报告同时给出三个指标，各自回答不同问题。</p>
+
+<table>
+<thead><tr><th>指标</th><th>含义</th><th>回答什么问题</th></tr></thead>
+<tbody>
+<tr><td><code>measured</code> (raw)</td><td>全窗口平均，含开场突发</td><td>长期带宽占用是否达标（SLA 口径）</td></tr>
+<tr><td><code>steady</code></td><td>首次 stall 之后的平均</td><td>整形器的令牌发放逻辑是否准确</td></tr>
+<tr><td><code>conformant</code></td><td><code>burst used ≤ B</code></td><td>是否违反 <code>cost ≤ R·T + B</code></td></tr>
+</tbody>
+</table>
+
+<h3 id="5-1">raw 误差为何可能很大</h3>
+
+<p>短窗口下 raw 误差约等于 <code>B / (R·T)</code>。桶深越大、窗口越短，这个值越大 —— <strong>它衡量的是桶深占比，不是整形精度</strong>。</p>
+
+<p>实测验证（<code>tc_buck_burst</code>，R=2 MB/s、B=8192 B，仅改包数）：</p>
+
+<table>
+<thead><tr><th>包数</th><th>total_cost</th><th>窗口</th><th>raw 平均</th><th>raw 误差</th><th>steady</th></tr></thead>
+<tbody>
+<tr><td class="num">200</td><td class="num">28137</td><td class="num">9.97 ms</td><td class="num">2.821e+06</td><td class="num">41.07%</td><td class="num">2.000e+06</td></tr>
+<tr><td class="num">800</td><td class="num">108164</td><td class="num">50.0 ms</td><td class="num">2.164e+06</td><td class="num">8.19%</td><td class="num">2.000e+06</td></tr>
+<tr><td class="num">3200</td><td class="num">432732</td><td class="num">212 ms</td><td class="num">2.039e+06</td><td class="num">1.93%</td><td class="num">2.000e+06</td></tr>
+<tr><td class="num">12800</td><td class="num">1741160</td><td class="num">866 ms</td><td class="num">2.009e+06</td><td class="num"><strong>0.47%</strong></td><td class="num">2.000e+06</td></tr>
+</tbody>
+</table>
+
+<div class="good">
+<p>误差按 <code>1/T</code> 衰减：41.07% → 8.19% → 1.93% → 0.47%。用最后一行验算 <code>8192/1741160 = 0.47%</code>，与实测完全吻合。同时 <code>steady</code> 在四种窗口下恒为 <code>2.000e+06</code>，证明整形逻辑从一开始就是准确的 —— 短窗口的 41% 只是初始突发信用的印记。</p>
+</div>
+
+<div class="warn">
+<p><strong>所以突发该算进平均吗？该算。</strong>长期平均本就应包含它并收敛到 R。判断整形器是否正确，应看 <code>steady</code> 和 <code>conformant</code>；判断带宽是否达标，应看 raw，但必须保证 <code>T ≫ B/R</code>。本例 <code>B/R = 4.1 ms</code>，故 10 ms 窗口远远不够，需要数百 ms。</p>
+</div>
+
+<h2 id="6">6. 总线协议：多 beat 传输</h2>
+
+<p><code>len</code> 是<strong>实际搬运的字节数</strong>，不是一个仅用于计费的数字。一个包按 <code>N = ceil(len/BPB)</code> 个 beat 传输（<code>BPB = DW/8</code>，默认 DW=32 故 BPB=4）。</p>
+
+<h3 id="6-1">信号定义 <span class="fileref">env/buck_if.sv</span></h3>
+
+<table>
+<thead><tr><th>信号</th><th>宽度</th><th>方向</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td><code>valid</code></td><td>1</td><td>drv→dut</td><td>本 beat 数据有效</td></tr>
+<tr><td><code>ready</code></td><td>1</td><td>dut→drv</td><td>可接收。纯组合、不依赖 valid，避免死锁</td></tr>
+<tr><td><code>data</code></td><td>DW</td><td>drv→dut</td><td>载荷</td></tr>
+<tr><td><code>keep</code></td><td>DW/8</td><td>drv→dut</td><td>字节使能。非末 beat 须全 1，末 beat 低位对齐</td></tr>
+<tr><td><code>last</code></td><td>1</td><td>drv→dut</td><td>包的最后一个 beat</td></tr>
+</tbody>
+</table>
+
+<h3 id="6-2">时序约定</h3>
+
+<ol>
+  <li>每个 beat 在 <code>valid &amp;&amp; ready</code> 同时为高的时钟沿被接收</li>
+  <li><code>last</code> 界定包边界</li>
+  <li>实际字节数 = <code>Σ popcount(keep)</code> over all beats</li>
+</ol>
+
+<div class="diagram">         ┌──┐  ┌──┐  ┌──┐  ┌──┐  ┌──┐  ┌──┐
+clk   ───┘  └──┘  └──┘  └──┘  └──┘  └──┘  └──
+         ┌─────────────────────────┐
+valid ───┘                         └──────────
+      ─────────┐     ┌───────────────────────
+ready          └─────┘          ← 背压 2 拍
+         ┌─────┬─────────┬─────┬─────┐
+data  ───┤ D0  │   D1    │ D2  │ D3  ├────────
+         └─────┴─────────┴─────┴─────┘
+keep     1111    1111      1111  0011  ← 末 beat 仅 2 字节
+                                 ┌─────┐
+last  ───────────────────────────┘     └──────
+
+此包 len = 4+4+4+2 = 14 字节，4 个 beat</div>
+
+<div class="note">
+<p><strong>令牌在整包第一个 beat 之前一次性扣除</strong>，不逐 beat 计费。否则大包会被拆散，<code>bucket_size</code> 将失去「允许多大突发」的语义。</p>
+</div>
+
+<h3 id="6-3">DUT 行为 <span class="fileref">rtl/buck_sink.v</span></h3>
+
+<p><code>buck_sink</code> 是一个带 FIFO 的接收端，每 <code>DRAIN_PERIOD</code> 拍排空一个包以模拟下游带宽上限。输出 <code>pkt_cnt</code>、<code>beat_cnt</code>、<code>byte_cnt</code>、<code>fifo_level</code>、<code>drop_cnt</code>、<code>err_keep</code> 供 monitor 自检。</p>
+
+<h3 id="6-4">包内 beat 空隙 <span class="fileref">env/buck_driver.sv</span></h3>
+
+<p>默认情况下一个包的各 beat 背靠背驱动。driver 提供钩子 <code>beat_gap(tr, idx)</code>，返回第 <code>idx</code> 个 beat 握手完成后插入的空闲拍数，基类返回 0，故已有 case 时序不变。<code>buck_gap_driver</code> 是一个现成的随机实现（见 <code>tc_buck_beatgap</code>）。</p>
+
+<div class="warn">
+<p><strong>空隙只能插在握手完成之后。</strong><code>valid</code> 一旦拉高，在 <code>ready</code> 到来前不得回撤 —— 这是 valid/ready 协议的硬性要求。因此实现上必须等 <code>do...while(ready !== 1)</code> 退出后再拉低 <code>valid</code>。末 beat 之后不插，包间节奏由令牌桶负责。</p>
+</div>
+
+<p>加入空隙后各层的受影响情况：</p>
+
+<table>
+<thead><tr><th>层次</th><th>受影响</th><th>原因</th></tr></thead>
+<tbody>
+<tr><td>monitor / DUT 计数</td><td>否</td><td>二者都只在 <code>valid &amp;&amp; ready</code> 成立时动作，空闲拍被天然忽略</td></tr>
+<tr><td>符合性 <code>is_conformant()</code></td><td>否</td><td>不依赖窗口口径，任何情形下严格成立</td></tr>
+<tr><td>raw / steady 速率</td><td>小空隙可忽略</td><td>线速 4 B/2 ns = 2e9 B/s，base case R=1e7 仅占 0.5%，每 beat 平均还有约 400 拍裕量；超出后 driver 成为瓶颈，窗口分母被拉长，两项指标都会偏低</td></tr>
+<tr><td>背压 / FIFO 水位覆盖</td><td><strong>是</strong></td><td>见下</td></tr>
+</tbody>
+</table>
+
+<div class="warn">
+<p><strong>不要让每个 beat 都插空隙。</strong>本 demo 的 DUT 排空速率是 4 B/4 ns = 1e9 B/s，恰为线速一半。只有背靠背输入才能把 <code>FIFO_DEPTH=16</code> 填满并触发背压（36-beat 的包净积累 18 beat）。若每拍都插隙，输入降到排空速率以下，FIFO 永远填不满，背压路径与 driver 等 <code>ready</code> 的分支就都失去覆盖了。所以空隙必须是随机的、并保留相当比例的 0，让背靠背片段与空隙片段混合出现。</p>
+</div>
+
+<h2 id="7">7. 代码结构</h2>
+
+<pre><code>dem_buck/
+├── rtl/
+│   └── buck_sink.v           # DUT：按 beat 接收，popcount(keep) 累加字节
+├── env/
+│   ├── buck_if.sv            # 接口：valid/ready + keep/last + DUT 统计回读
+│   ├── buck_transaction.sv   # 事务：len + payload[] 真实载荷
+│   ├── token_bucket.sv       # ★ 令牌桶核心（GCRA）
+│   ├── buck_sequence.sv      # 发包 sequence，取令牌后才放行
+│   ├── buck_driver.sv        # 多 beat 驱动 + beat_gap() 钩子 / buck_gap_driver
+│   ├── buck_monitor.sv       # 按 last 聚包 + 协议检查 + 与 DUT 对账
+│   ├── buck_env.sv           # agent / env，创建并发布 bucket
+│   └── buck_pkg.sv           # package
+├── tc/
+│   └── buck_test.sv          # 6 个 testcase
+├── th/
+│   └── tb_top.sv             # testbench top
+├── cfg/
+│   └── tb.f                  # filelist
+└── sim/
+    ├── Makefile
+    ├── regress.csh           # 回归脚本
+    └── sweep.csh             # 窗口扫描（验证 raw 收敛性）</code></pre>
+
+<h3 id="7-1">关键类</h3>
+
+<h4><code>token_bucket_cfg</code></h4>
+<table>
+<thead><tr><th>成员</th><th>默认值</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td><code>rate_tokens_per_sec</code></td><td>1e6</td><td>令牌产生速率，单位由 <code>item_cost()</code> 决定</td></tr>
+<tr><td><code>bucket_size</code></td><td>1024.0</td><td>桶深，即最大突发量</td></tr>
+<tr><td><code>init_tokens</code></td><td>-1.0</td><td>初始令牌；负值表示装满</td></tr>
+<tr><td><code>allow_oversize</code></td><td>1</td><td>1=按实际开销放行（延长等待），0=fatal</td></tr>
+</tbody>
+</table>
+
+<h4><code>token_bucket</code> 主要接口</h4>
+<table>
+<thead><tr><th>方法</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td><code>configure(cfg)</code></td><td>使用前必须调用，校验参数并初始化 TAT</td></tr>
+<tr><td><code>consume(cost)</code></td><td><strong>阻塞式</strong>取令牌，不足则精确等待</td></tr>
+<tr><td><code>try_consume(cost)</code></td><td>非阻塞，不足立即返回 0</td></tr>
+<tr><td><code>current_tokens()</code></td><td>当前可用令牌（可能为负，表示借支）</td></tr>
+<tr><td><code>measured_rate()</code></td><td>raw 平均速率</td></tr>
+<tr><td><code>steady_rate()</code></td><td>稳态速率</td></tr>
+<tr><td><code>is_conformant()</code></td><td>符合性判定，留 1% 浮点容差</td></tr>
+<tr><td><code>print_stats(tag)</code></td><td>打印完整统计</td></tr>
+</tbody>
+</table>
+
+<h4><code>buck_driver</code> / <code>buck_gap_driver</code></h4>
+<table>
+<thead><tr><th>成员</th><th>默认值</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td><code>beat_gap(tr, idx)</code></td><td>返回 0</td><td>基类钩子：第 <code>idx</code> 个 beat 握手后插入的空闲拍数</td></tr>
+<tr><td><code>gap_percent</code></td><td>40</td><td><code>buck_gap_driver</code>：插空隙的概率（%），其余背靠背</td></tr>
+<tr><td><code>gap_min</code> / <code>gap_max</code></td><td>1 / 3</td><td><code>buck_gap_driver</code>：空隙拍数范围</td></tr>
+</tbody>
+</table>
+
+<h2 id="8">8. 使用说明</h2>
+
+<h3 id="8-1">8.1 环境准备</h3>
+
+<div class="warn">
+<p><code>project.cshrc</code> 通过向上查找定位项目根目录，<strong>必须先 cd 到项目内再 source</strong>，否则会报 <code>Cannot find root dir</code> 并导致 <code>vcs: Command not found</code>。</p>
+</div>
+
+<pre><code>cd /data2/project/Su2520/taohu/Su2520/dem_buck/sim
+source /data2/project/Su2520/taohu/Su2520/script/project.cshrc</code></pre>
+
+<h3 id="8-2">8.2 常用命令</h3>
+
+<pre><code>make comp                      # 编译
+make run  TC=tc_buck_base      # 跑单个 case
+make all  TC=tc_buck_rate      # 编译 + 仿真
+make wave TC=tc_buck_base      # 带 fsdb 波形
+make verdi TC=tc_buck_base     # 打开 Verdi
+make clean
+make help                      # 查看可用 TC
+
+./regress.csh                  # 全回归（推荐，csh 环境下比 make regress 稳）
+./sweep.csh                    # 窗口扫描，观察 raw 误差随 T 收敛</code></pre>
+
+<h3 id="8-3">8.3 可配变量</h3>
+
+<table>
+<thead><tr><th>变量</th><th>默认</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td><code>TC</code></td><td>tc_buck_base</td><td>testcase 名</td></tr>
+<tr><td><code>SEED</code></td><td>1</td><td>随机种子</td></tr>
+<tr><td><code>VERB</code></td><td>UVM_LOW</td><td>UVM verbosity</td></tr>
+<tr><td><code>TIMEOUT_MS</code></td><td>50</td><td>看门狗超时（ms）</td></tr>
+</tbody>
+</table>
+
+<p>运行时 plusarg：<code>+UVM_TESTNAME</code>、<code>+TIMEOUT_MS=&lt;n&gt;</code>、<code>+NUM_ITEMS=&lt;n&gt;</code>、<code>+FSDB</code>。</p>
+
+<div class="warn">
+<p><strong>低速率 × 大包需要足够的超时。</strong>例如 1 MB/s 发 100 个平均 146 B 的包约需 14.6 ms。若看到 <code>UVM_FATAL [TIMEOUT]</code>，先核对 <code>TIMEOUT_MS</code> 是否够用，而非怀疑整形逻辑。</p>
+</div>
+
+<h3 id="8-4">8.4 testcase 一览 <span class="fileref">tc/buck_test.sv</span></h3>
+
+<table>
+<thead><tr><th>testcase</th><th>速率</th><th>桶深</th><th>init</th><th>包数</th><th>侧重</th></tr></thead>
+<tbody>
+<tr><td><code>tc_buck_base</code></td><td>10 MB/s</td><td>1024</td><td>满</td><td>200</td><td>基本功能</td></tr>
+<tr><td><code>tc_buck_rate</code></td><td>1 MB/s</td><td>512</td><td>0</td><td>100</td><td>低速率精度</td></tr>
+<tr><td><code>tc_buck_burst</code></td><td>2 MB/s</td><td>8192</td><td>满</td><td>200</td><td>大突发，判 steady + 符合性</td></tr>
+<tr><td><code>tc_buck_pps</code></td><td>100 Kpps</td><td>16</td><td>0</td><td>200</td><td>按包率限速（定长 64 B）</td></tr>
+<tr><td><code>tc_buck_shared</code></td><td>4 MB/s</td><td>1024</td><td>0</td><td>2×100</td><td>两条 sequence 共享一个桶</td></tr>
+<tr><td><code>tc_buck_beatgap</code></td><td>10 MB/s</td><td>1024</td><td>0</td><td>200</td><td>包内 beat 随机插空隙，只判符合性与计数</td></tr>
+</tbody>
+</table>
+
+<h2 id="9">9. 如何自定义</h2>
+
+<h3 id="9-1">9.1 改速率 / 桶深</h3>
+
+<p>继承 <code>tc_buck_base</code>，重载 <code>set_bucket_cfg()</code>：</p>
+
+<pre><code>class tc_my_case extends tc_buck_base;
+    `uvm_component_utils(tc_my_case)
+
+    function new(string name, uvm_component parent);
+        super.new(name, parent);
+    endfunction
+
+    virtual function void set_bucket_cfg(token_bucket_cfg c);
+        c.rate_tokens_per_sec = 5_000_000.0;  // 5 MB/s
+        c.bucket_size         = 2048.0;
+        c.init_tokens         = 0.0;          // 从空桶起，直接测稳态
+    endfunction
+
+    virtual function int unsigned get_num_items();
+        return 500;
+    endfunction
+endclass</code></pre>
+
+<p>记得把新 case 加进 <code>Makefile</code> 的 <code>TC_LIST</code> 和 <code>regress.csh</code>。</p>
+
+<h3 id="9-2">9.2 从控带宽切换到控包率</h3>
+
+<p>重载 <code>item_cost()</code> 即可，速率单位随之改变：</p>
+
+<pre><code>// 控 byte/s（默认）
+virtual function real item_cost(buck_transaction tr);
+    return real'(tr.len);
+endfunction
+
+// 控 packet/s
+virtual function real item_cost(buck_transaction tr);
+    return 1.0;
+endfunction
+
+// 也可自定义加权，例如计入每包固定开销
+virtual function real item_cost(buck_transaction tr);
+    return real'(tr.len) + 24.0;   // 模拟前导码 + IFG
+endfunction</code></pre>
+
+<h3 id="9-3">9.3 加包长约束</h3>
+
+<pre><code>virtual function void randomize_item(buck_transaction tr);
+    if (!tr.randomize() with { len inside {[64:1518]}; })
+        `uvm_error("RNDFAIL", "randomize failed")
+endfunction</code></pre>
+
+<h3 id="9-4">9.4 多流共享总带宽</h3>
+
+<p>把同一个 <code>token_bucket</code> 句柄交给多条 sequence，总流量即受统一限制（见 <code>tc_buck_shared</code>）：</p>
+
+<pre><code>fork
+    begin seq0.bucket = env.bucket; seq0.start(env.agent.sequencer); end
+    begin seq1.bucket = env.bucket; seq1.start(env.agent.sequencer); end
+join</code></pre>
+
+<p>也可不显式赋值，由 sequence 自行从 <code>uvm_config_db#(token_bucket)</code> 按 <code>bucket_name</code>（默认 <code>"tb_bucket"</code>）获取。</p>
+
+<h3 id="9-5">9.5 加包内空隙</h3>
+
+<p>重载 <code>beat_gap()</code>，再用 factory 把 driver 换掉：</p>
+
+<pre><code>class my_gap_driver extends buck_driver;
+    `uvm_component_utils(my_gap_driver)
+    // ... new() ...
+
+    virtual function int unsigned beat_gap(buck_transaction tr, int unsigned idx);
+        if ($urandom_range(1, 100) > 40) return 0;   // 60% 背靠背
+        return $urandom_range(1, 3);
+    endfunction
+endclass
+
+// 在 test 的 build_phase 里, super.build_phase() 之前
+buck_driver::type_id::set_type_override(my_gap_driver::get_type());</code></pre>
+
+<div class="warn">
+<p>判据要跟着改。包内空隙会把单包搬运时间拉长，从而推后下一次 <code>consume()</code> 的调用时刻，这在墙钟窗口上表现为 raw / steady 偏低 —— 它们的分母无法区分「等令牌」与「等总线」。因此这类 case 不应以速率为判据，只卡<strong>符合性</strong>与<strong>协议/计数对账</strong>两件事（参见 <code>tc_buck_beatgap</code>）。另外切记保留相当比例的 0 空隙，否则背压覆盖会丢（见 <a href="#6-4">包内 beat 空隙</a>）。</p>
+</div>
+
+<h2 id="10">10. 回归结果</h2>
+
+<p>VCS 2020.12sp2，<code>SEED=1</code>，<span class="tag tag-ok">6/6 PASS</span> · 0 UVM_ERROR · 0 UVM_FATAL</p>
+
+<table>
+<thead><tr><th>testcase</th><th>配置</th><th>raw</th><th>raw 误差</th><th>steady</th><th>steady 误差</th><th>burst used</th><th>符合</th></tr></thead>
+<tbody>
+<tr><td><code>tc_buck_base</code></td><td class="num">1.0e+07</td><td class="num">1.038e+07</td><td class="num">3.78%</td><td class="num">1.000e+07</td><td class="num">0.00%</td><td class="num">1024/1024</td><td>YES</td></tr>
+<tr><td><code>tc_buck_rate</code></td><td class="num">1.0e+06</td><td class="num">1.017e+06</td><td class="num">1.72%</td><td class="num">1.000e+06</td><td class="num">0.00%</td><td class="num">256/512</td><td>YES</td></tr>
+<tr><td><code>tc_buck_burst</code></td><td class="num">2.0e+06</td><td class="num">2.821e+06</td><td class="num">41.07%</td><td class="num">2.000e+06</td><td class="num">0.00%</td><td class="num">8192/8192</td><td>YES</td></tr>
+<tr><td><code>tc_buck_pps</code></td><td class="num">1.0e+05</td><td class="num">1.005e+05</td><td class="num">0.50%</td><td class="num">1.000e+05</td><td class="num">0.00%</td><td class="num">1/16</td><td>YES</td></tr>
+<tr><td><code>tc_buck_shared</code></td><td class="num">4.0e+06</td><td class="num">4.036e+06</td><td class="num">0.89%</td><td class="num">4.000e+06</td><td class="num">0.00%</td><td class="num">251/1024</td><td>YES</td></tr>
+<tr><td><code>tc_buck_beatgap</code></td><td class="num">1.0e+07</td><td class="num">1.009e+07</td><td class="num">0.89%</td><td class="num">1.000e+07</td><td class="num">0.00%</td><td class="num">256/1024</td><td>YES</td></tr>
+</tbody>
+</table>
+
+<p>DUT 与 monitor 三项计数逐 case 一致，<code>keep_err = 0</code>：</p>
+
+<table>
+<thead><tr><th>testcase</th><th>pkt (dut/mon)</th><th>beat</th><th>byte</th></tr></thead>
+<tbody>
+<tr><td><code>tc_buck_base</code></td><td class="num">200/200</td><td class="num">7106/7106</td><td class="num">28137/28137</td></tr>
+<tr><td><code>tc_buck_rate</code></td><td class="num">100/100</td><td class="num">3687/3687</td><td class="num">14605/14605</td></tr>
+<tr><td><code>tc_buck_burst</code></td><td class="num">200/200</td><td class="num">7106/7106</td><td class="num">28137/28137</td></tr>
+<tr><td><code>tc_buck_pps</code></td><td class="num">200/200</td><td class="num">3200/3200</td><td class="num">12800/12800</td></tr>
+<tr><td><code>tc_buck_shared</code></td><td class="num">200/200</td><td class="num">6462/6462</td><td class="num">25549/25549</td></tr>
+<tr><td><code>tc_buck_beatgap</code></td><td class="num">200/200</td><td class="num">7106/7106</td><td class="num">28137/28137</td></tr>
+</tbody>
+</table>
+
+<div class="good">
+<p><code>tc_buck_pps</code> 可作交叉验证：定长 64 B，200 包 × 16 beat = 3200 beat，恰好 12800 字节 —— 总线上确实搬运了这些数据。<code>tc_buck_base</code> 平均包长 <code>28137/200 = 140.7 B</code>，与 <code>len</code> 随机区间 16~256 的均值相符。</p>
+</div>
+
+<p><code>tc_buck_beatgap</code> 与 <code>tc_buck_base</code> 配置完全相同（R=1e7、B=1024、200 包），唯一差别是 40% 的 beat 后插 1~3 拍空隙，可直接对比：</p>
+
+<table>
+<thead><tr><th>指标</th><th>base</th><th>beatgap</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td>beat / byte</td><td class="num">7106 / 28137</td><td class="num">7106 / 28137</td><td><strong>逐位相同</strong> —— monitor 与 DUT 对空隙免疫</td></tr>
+<tr><td>仿真时长</td><td class="num">2.712 ms</td><td class="num">2.815 ms</td><td>+3.8%，空隙只占总时长的零头</td></tr>
+<tr><td>raw 误差</td><td class="num">3.78%</td><td class="num">0.89%</td><td>窗口变长，<code>B/(R·T)</code> 这一项被摊薄</td></tr>
+<tr><td>burst used</td><td class="num">1024</td><td class="num">256</td><td>空隙期间桶在补令牌，开场的突发信用没被一次性用光</td></tr>
+<tr><td>conformant</td><td>YES</td><td>YES</td><td>上界始终未被突破</td></tr>
+</tbody>
+</table>
+
+<h2 id="11">11. 已知限制</h2>
+
+<ul>
+  <li><strong>timescale 固定为 1ns/1ps。</strong><code>token_bucket</code> 用 <code>/1e9</code> 把 <code>$realtime</code> 换算成秒，依赖 timeunit=1ns。修改 timescale 需同步调整该换算。</li>
+  <li><strong><code>tc_buck_burst</code> 未设 raw 误差门限。</strong>当前主判据是 <code>steady</code> + 符合性。若要卡 raw，门限应随窗口自适应（约 <code>B/(R·T) + 2%</code>），而非写死常数。</li>
+  <li><strong>oversize 路径未被回归覆盖。</strong>当前 <code>len ≤ 256</code> 小于最小桶深 512，走不到该分支。需验证可加一个 <code>bucket_size=128</code> 的 case。</li>
+  <li><strong><code>drop_cnt</code> 统计的是背压拍数</strong>（<code>valid &amp;&amp; !ready</code>），不是真正的丢包。</li>
+  <li><strong><code>tc_buck_beatgap</code> 的背压覆盖未经实测验证。</strong>monitor 的 summary 不打印 <code>drop_cnt</code> 与 <code>fifo_level</code> 峰值，因此「插隙后 60% 的 beat 仍背靠背、背压路径仍被打到」只是理论推断。要确认须在 <code>buck_monitor.sv</code> 的 <code>report_phase</code> 里补打这两个值。</li>
+  <li><strong><code>$value$plusargs</code> 须判返回值。</strong>plusarg 不存在时不可假定目标变量保持默认值，必须 <code>if (...) n = arg;</code> —— 此前因此踩过一次坑，<code>num_items</code> 被意外变成了上次扫描的残留值。</li>
+</ul>
+
+<h2 id="A">附录 A. <code>token_bucket</code> 源码详解 <span class="fileref">env/token_bucket.sv</span></h2>
+
+<p>全文 273 行，一个 cfg 类 + 一个桶类，不起任何后台线程。下面按成员逐一拆开。</p>
+
+<h3 id="A-1">A.1 状态变量：真正的状态只有一个</h3>
+
+<table>
+<thead><tr><th>变量</th><th>类型</th><th>作用</th></tr></thead>
+<tbody>
+<tr><td><code>tat_ns</code></td><td><code>real</code></td><td><strong>唯一的桶状态</strong>。单位 ns，含义是「桶恢复到满所需时刻」。令牌数由它推算，不单独存</td></tr>
+<tr><td><code>sem</code></td><td><code>semaphore(1)</code></td><td>串行化时隙预约，保证多 sequence 共享一个桶时总流量受限</td></tr>
+<tr><td><code>grant_cnt</code> / <code>total_cost</code></td><td><code>int</code> / <code>real</code></td><td>放行包数与累计开销。<code>total_cost</code> 用 <code>real</code>，因为 <code>cost</code> 本身是 <code>real</code>（可能带权重、非整数）</td></tr>
+<tr><td><code>first_grant</code> / <code>last_grant</code></td><td><code>realtime</code></td><td>raw 窗口的两端</td></tr>
+<tr><td><code>total_stall</code></td><td><code>realtime</code></td><td>所有调用方在 <code>consume()</code> 里累计阻塞的时间</td></tr>
+<tr><td><code>steady_valid</code> 及 3 个 <code>steady_start_*</code></td><td>—</td><td>稳态窗口起点快照，首次 stall 时冻结</td></tr>
+<tr><td><code>max_excess</code> / <code>f_min</code></td><td><code>real</code></td><td>符合性跟踪，见 <a href="#A-5">A.5</a></td></tr>
+</tbody>
+</table>
+
+<div class="note">
+<p><code>tat_ns</code> 用 <code>real</code>（而非 <code>realtime</code>）保存是刻意的：它是一个<strong>虚拟时间刻度</strong>，可以超出当前仿真时间任意远，参与的全是浮点运算；只在真正要延时时才换算回 <code>1ns</code> 单位。</p>
+</div>
+
+<h3 id="A-2">A.2 <code>configure()</code>：把初始令牌数反折成 TAT</h3>
+
+<pre><code>init_tok = (c.init_tokens &lt; 0.0) ? c.bucket_size : c.init_tokens;
+if (init_tok &gt; c.bucket_size) init_tok = c.bucket_size;
+
+// 由 tokens = B - (tat - now)*R 反解
+tat_ns = real'($realtime) + tok2ns(cfg.bucket_size - init_tok);</code></pre>
+
+<ul>
+  <li><code>init_tokens &lt; 0</code> 约定为「装满」，这样默认值 <code>-1.0</code> 就表示满桶；想测稳态则显式写 <code>0.0</code></li>
+  <li>超过桶深的初值被裁剪 —— 桶装不下更多</li>
+  <li>满桶 ⟹ <code>tat_ns = now</code>；空桶 ⟹ <code>tat_ns = now + B/R</code>，即「要等 B/R 才攒满」</li>
+  <li>前置三道 fatal 检查：<code>cfg</code> 非空、<code>rate &gt; 0</code>、<code>bucket_size &gt; 0</code>。速率为 0 会让 <code>tok2ns()</code> 除零，必须挡在门外</li>
+</ul>
+
+<h3 id="A-3">A.3 <code>tok2ns()</code> 与 <code>effective_cost()</code></h3>
+
+<pre><code>protected function real tok2ns(real tok);
+    return (tok / cfg.rate_tokens_per_sec) * 1e9;
+endfunction</code></pre>
+
+<p>唯一的单位换算点。<code>1e9</code> 这个常数意味着<strong>整个类假定 timeunit = 1ns</strong>，改 timescale 必须同步改这里（已列入<a href="#11">已知限制</a>）。</p>
+
+<p><code>effective_cost()</code> 做三件事：</p>
+
+<ol>
+  <li><code>cost &lt;= 0</code> 直接归零 —— 零开销的包不占额度，也避免负数把 TAT 往回拽</li>
+  <li><code>cost &gt; bucket_size</code> 时按 <code>allow_oversize</code> 分流：1 则 warning 后放行，0 则 fatal</li>
+  <li>无论如何<strong>返回原值，不截断</strong>。这是 <a href="#4-1">4.1</a> 讲的那条：截断等于给大包打折，长期速率会超标</li>
+</ol>
+
+<h3 id="A-4">A.4 <code>consume()</code> 逐段解读</h3>
+
+<p>这是全类的核心，分四段。</p>
+
+<p><strong>第 1 段 — 进门记账</strong></p>
+
+<pre><code>t_enter = $realtime;              // 用于算本次调用的阻塞时长
+need    = effective_cost(cost);   // 校验在锁外做, 不占临界区</code></pre>
+
+<p><strong>第 2 段 — 锁内 O(1) 预约时隙</strong></p>
+
+<pre><code>sem.get(1);
+t_ns        = real'($realtime);
+earliest_ns = tat_ns - tok2ns(cfg.bucket_size - need);
+start_ns    = (earliest_ns &gt; t_ns) ? earliest_ns : t_ns;
+tat_ns      = ((start_ns &gt; tat_ns) ? start_ns : tat_ns) + tok2ns(need);
+sem.put(1);</code></pre>
+
+<table>
+<thead><tr><th>行</th><th>含义</th></tr></thead>
+<tbody>
+<tr><td><code>earliest_ns</code></td><td>「令牌够了」的最早时刻，由 <code>tokens ≥ need ⟺ t ≥ TAT − (B−need)/R</code> 直接得出</td></tr>
+<tr><td><code>start_ns</code></td><td>实际放行时刻 = <code>max(最早时刻, 当前时刻)</code>。令牌已够时取当前时刻，立即放行</td></tr>
+<tr><td><code>tat_ns</code> 更新</td><td>先 <code>max(start_ns, tat_ns)</code> 再加 <code>need/R</code>。内层 max 保证<strong>空闲期不会让 TAT 落后于现在</strong>（否则桶会「攒出」超过 B 的额度），外层加法就是把这个包的额度从未来扣掉</td></tr>
+</tbody>
+</table>
+
+<p>这四行<strong>不消耗仿真时间</strong>，所以临界区是真正的 O(1)，不存在队头阻塞。多条流并发时按到达顺序各自拿到一个互不重叠的时隙 —— 这正是 <code>tc_buck_shared</code> 能让总带宽受限的原因。</p>
+
+<p><strong>第 3 段 — 锁外等待</strong></p>
+
+<pre><code>delay_ns = start_ns - t_ns;
+stalled  = (delay_ns &gt; 0.0);
+if (stalled) #(delay_ns * 1ns);</code></pre>
+
+<p>一次闭式延时，没有循环逼近，也不需要「防零延时死循环」的兜底判断。<code>stalled</code> 这个标志随后用来界定稳态起点。</p>
+
+<p><strong>第 4 段 — 出门记账</strong></p>
+
+<pre><code>if (grant_cnt == 0) begin first_grant = $realtime; last_grant = $realtime; end
+if ($realtime &gt; last_grant) last_grant = $realtime;
+grant_cnt++;
+total_stall += ($realtime - t_enter);
+account(need);
+
+if (stalled &amp;&amp; !steady_valid) begin   // 首次 stall ⟹ 突发信用耗尽
+    steady_valid = 1;
+    steady_start_time = $realtime;
+    steady_start_cost = total_cost;
+    steady_start_cnt  = grant_cnt;
+end</code></pre>
+
+<ul>
+  <li><code>last_grant</code> 用 <code>max</code> 更新而非直接赋值：并发时多个进程可能在同一时刻完成，顺序不定，直接赋值会把窗口右端往回拨</li>
+  <li>这一段全是非阻塞运算，天然原子，所以<strong>刻意不持锁</strong></li>
+  <li>「首次 stall 即稳态起点」是一个干净的判据：桶里还有存货时不会 stall，一旦 stall 说明存货已空，此后系统完全由 R 支配</li>
+</ul>
+
+<h3 id="A-5">A.5 <code>account()</code>：O(1) 覆盖任意窗口的符合性</h3>
+
+<pre><code>span_s   = (last_grant - first_grant) / 1e9;
+f_before = total_cost - span_s * cfg.rate_tokens_per_sec;
+if (f_before &lt; f_min) f_min = f_before;      // running 最小值
+
+total_cost += add_cost;
+
+f_after = total_cost - span_s * cfg.rate_tokens_per_sec;
+if ((f_after - f_min) &gt; max_excess) max_excess = f_after - f_min;</code></pre>
+
+<p>原理见 <a href="#4-2">4.2</a>：令 <code>f(t) = cost(t) − R·t</code>，任意窗口 <code>[t₁,t₂]</code> 的超额就是 <code>f(t₂) − f(t₁)</code>，其最大值等于 <code>f(t) − min f</code>。所以只要维护 <code>f</code> 的 running 最小值，就能用一次比较覆盖<strong>所有</strong>窗口，不需要存历史。</p>
+
+<p>注意加 <code>cost</code> 前后各算一次 <code>f</code>：加之前的值用来更新 <code>f_min</code>（窗口左端应取在本包<strong>之前</strong>），加之后的值用来更新 <code>max_excess</code>（窗口右端取在本包<strong>之后</strong>）。顺序颠倒会让同一个包既算进左端又算进右端，低估超额。</p>
+
+<h3 id="A-6">A.6 <code>try_consume()</code>：非阻塞版</h3>
+
+<p>逻辑与 <code>consume()</code> 的第 2 段相同，差别只有两点：</p>
+
+<ul>
+  <li><code>earliest_ns &gt; t_ns</code> 时<strong>立即返回 0</strong>，不推进 <code>tat_ns</code> —— 没放行就不该扣额度</li>
+  <li>不取 <code>sem</code>。整个函数是 <code>function</code>（不消耗仿真时间），在 SV 调度里天然原子</li>
+</ul>
+
+<p>统计口径与 <code>consume()</code> 对齐：同样走 <code>account()</code>、同样更新 <code>first/last_grant</code> 与 <code>grant_cnt</code>，所以两种调用方式可以混用而不破坏报告。唯一不记的是 <code>total_stall</code>（它从不阻塞）与稳态起点（它从不 stall）。</p>
+
+<h3 id="A-7">A.7 <code>current_tokens()</code>：可以为负</h3>
+
+<pre><code>tok = cfg.bucket_size - (tat_ns - real'($realtime)) * cfg.rate_tokens_per_sec / 1e9;
+return (tok &gt; cfg.bucket_size) ? cfg.bucket_size : tok;</code></pre>
+
+<p>上限裁到 <code>B</code>（桶装不下更多），但<strong>不裁下限</strong>。负值是有意义的：oversize 的包借支了未来额度，TAT 被推到很远，此时令牌数为负正确反映了「欠账」状态。这个函数只用于 <code>UVM_DEBUG</code> 日志，不参与任何判定。</p>
+
+<h3 id="A-8">A.8 三个速率函数：区别全在分母</h3>
+
+<table>
+<thead><tr><th>函数</th><th>分子</th><th>分母</th><th>返回 0 的条件</th></tr></thead>
+<tbody>
+<tr><td><code>measured_rate()</code></td><td><code>total_cost</code></td><td><code>last_grant − first_grant</code></td><td>包数 &lt; 2 或窗口为 0</td></tr>
+<tr><td><code>steady_rate()</code></td><td><code>total_cost − steady_start_cost</code></td><td><code>last_grant − steady_start_time</code></td><td>未进稳态，或稳态内包数 &lt; 2</td></tr>
+<tr><td><code>is_conformant()</code></td><td colspan="2"><code>max_excess ≤ bucket_size × 1.01</code>，<strong>不涉及窗口</strong></td><td>—</td></tr>
+</tbody>
+</table>
+
+<p>「包数 &lt; 2」的保护是必要的：单包的窗口为 0，会除零。</p>
+
+<div class="warn">
+<p><strong>两个 rate 函数的分母是墙钟时间，它分不清「等令牌」与「等总线」。</strong>所以一旦引入背压或<a href="#6-4">包内空隙</a>，二者都会偏低（见 <code>tc_buck_beatgap</code>）。<code>is_conformant()</code> 不依赖窗口口径，是唯一在任何情形下都严格成立的硬判据 —— 判整形器对不对，先看它。</p>
+</div>
+
+<p><code>1.01</code> 的容差是为了吸收浮点累加误差，不是为了放水：真实违约的量级是桶深本身，不会落在 1% 以内。</p>
+
+<h3 id="A-9">A.9 <code>print_stats()</code> 字段对照</h3>
+
+<table>
+<thead><tr><th>打印字段</th><th>来源</th><th>怎么看</th></tr></thead>
+<tbody>
+<tr><td><code>grant_cnt</code> / <code>total_cost</code></td><td>计数器</td><td><code>total_cost/grant_cnt</code> 应等于平均包长</td></tr>
+<tr><td><code>window</code></td><td><code>(last−first)/1000</code> us</td><td>与 <code>B/R</code> 比较，判断 raw 是否可信</td></tr>
+<tr><td><code>measured</code> / <code>rate error</code></td><td><code>measured_rate()</code></td><td>误差约等于 <code>B/(R·T)</code>，窗口短时偏大是正常的</td></tr>
+<tr><td><code>steady</code> / <code>steady error</code></td><td><code>steady_rate()</code></td><td>整形逻辑的主判据，应接近 0.00%</td></tr>
+<tr><td><code>burst used</code></td><td><code>max_excess / bucket_size</code></td><td>实际用掉的突发信用，必须 ≤ 桶深</td></tr>
+<tr><td><code>conformant</code></td><td><code>is_conformant()</code></td><td>硬判据，必须 YES</td></tr>
+<tr><td><code>total_stall</code></td><td>累加值</td><td>多流并发时可能<strong>大于</strong>窗口长度（各流阻塞时间相加）</td></tr>
+</tbody>
+</table>
+
+<p><code>steady error</code> 在未进稳态时打印 0.00% 而非误导性的数值 —— 由 <code>steady_available()</code> 把门。</p>
+
+<h3 id="A-10">A.10 使用约束小结</h3>
+
+<ol>
+  <li><strong>先 <code>configure()</code> 再用。</strong>它同时负责参数校验与统计清零，漏调会用到未初始化的 <code>tat_ns</code></li>
+  <li><strong><code>consume()</code> 是 task，必须在 task 上下文里调。</strong>需要非阻塞语义时用 <code>try_consume()</code></li>
+  <li><strong>自愿 idle 不违约。</strong>契约 <code>cost ≤ R·T + B</code> 是单侧不等式，只管「不许更快」。实际速率 = <code>min(桶上界, 请求到达速率)</code>，想让桶成为瓶颈需保证请求足够密</li>
+  <li><strong>idle 要插在 <code>finish_item()</code> 之后</strong>，不要插在 <code>consume()</code> 之前 —— 后者会把自愿等待计入 <code>total_stall</code>，污染稳态起点的判定</li>
+  <li><strong>timeunit 必须是 1ns</strong>，见 <a href="#A-3">A.3</a></li>
+</ol>
+
+<footer>
+dem_buck · 令牌桶流控发包器 · UVM + VCS 2020.12sp2<br>
+核心实现：<code>env/token_bucket.sv</code>（GCRA 虚拟时间）
+</footer>
+
+</div>
+
+<script>
+(function(){
+  var nav    = document.getElementById('nav');
+  var toggle = document.getElementById('nav-toggle');
+  var links  = [].slice.call(nav.querySelectorAll('a'));
+  var targets = links.map(function(a){
+    return document.getElementById(decodeURIComponent(a.hash.slice(1)));
+  });
+
+  // 窄屏: 按钮开合, 点击条目后自动收起
+  toggle.addEventListener('click', function(){ nav.classList.toggle('open'); });
+  nav.addEventListener('click', function(e){
+    if (e.target.tagName === 'A') nav.classList.remove('open');
+  });
+
+  function highlight(){
+    var i, cur = 0;
+    // 取最后一个已滚过视口上沿(留 80px 余量)的标题
+    for (i = 0; i < targets.length; i++) {
+      if (targets[i] && targets[i].getBoundingClientRect().top <= 80) cur = i;
+    }
+    // 滚到底部时强制选中最后一项
+    if (window.innerHeight + window.scrollY >= document.body.scrollHeight - 4)
+      cur = targets.length - 1;
+    for (i = 0; i < links.length; i++) links[i].classList.toggle('active', i === cur);
+    var act = links[cur];
+    // 导航项超出侧栏可视区时滚入
+    if (act.offsetTop < nav.scrollTop ||
+        act.offsetTop + act.offsetHeight > nav.scrollTop + nav.clientHeight) {
+      nav.scrollTop = act.offsetTop - nav.clientHeight / 2;
+    }
+  }
+
+  var pending = false;
+  window.addEventListener('scroll', function(){
+    if (pending) return;
+    pending = true;
+    requestAnimationFrame(function(){ pending = false; highlight(); });
+  });
+  window.addEventListener('resize', highlight);
+  highlight();
+})();
+</script>
+
+</body>
+</html>
