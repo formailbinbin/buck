@@ -1,0 +1,1879 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>令牌桶 原理与实现 交互动画</title>
+<style>
+  :root{
+    --bg:#fff; --fg:#1f2328; --muted:#656d76; --line:#d1d9e0;
+    --code-bg:#f6f8fa; --accent:#0969da; --warn-bg:#fff8c5; --warn-line:#d4a72c;
+    --ok-bg:#dafbe1; --ok-line:#2da44e; --bad-bg:#ffebe9; --bad-line:#cf222e;
+    --tok:#2da44e; --pkt:#0969da; --wait:#d4a72c;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; padding:0 24px 80px;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans",
+                "PingFang SC","Microsoft YaHei",Helvetica,Arial,sans-serif;
+    font-size:16px; line-height:1.7; color:var(--fg); background:var(--bg);
+  }
+  .wrap{max-width:1000px; margin:0 auto}
+  header{padding:40px 0 20px; border-bottom:1px solid var(--line)}
+  h1{font-size:28px; margin:0 0 8px; font-weight:600}
+  .sub{color:var(--muted); font-size:15px}
+  h2{font-size:22px; font-weight:600; margin:44px 0 14px; padding-bottom:8px; border-bottom:1px solid var(--line)}
+  h3{font-size:17px; font-weight:600; margin:28px 0 10px}
+  p{margin:12px 0}
+  code{font-family:ui-monospace,Consolas,monospace; font-size:85%;
+       background:var(--code-bg); padding:.2em .4em; border-radius:6px; white-space:nowrap}
+  pre{background:var(--code-bg); border-radius:6px; padding:14px; overflow-x:auto; margin:14px 0}
+  pre code{background:none; padding:0; font-size:13px; white-space:pre}
+  table{border-collapse:collapse; width:100%; margin:14px 0; font-size:14.5px}
+  th,td{border:1px solid var(--line); padding:6px 12px; text-align:left}
+  th{background:var(--code-bg); font-weight:600}
+  td.num{text-align:right; font-family:ui-monospace,Consolas,monospace}
+  .note,.warn,.good{padding:12px 16px; margin:14px 0; border-radius:6px;
+       border-left:4px solid var(--accent); background:#ddf4ff}
+  .warn{border-left-color:var(--warn-line); background:var(--warn-bg)}
+  .good{border-left-color:var(--ok-line); background:var(--ok-bg)}
+  .note p:first-child,.warn p:first-child,.good p:first-child{margin-top:0}
+  .note p:last-child,.warn p:last-child,.good p:last-child{margin-bottom:0}
+  .formula{background:var(--code-bg); border:1px solid var(--line); border-radius:6px;
+       padding:12px 16px; margin:14px 0; text-align:center;
+       font-family:ui-monospace,Consolas,monospace; font-size:15px; overflow-x:auto}
+  footer{margin-top:56px; padding-top:20px; border-top:1px solid var(--line);
+       color:var(--muted); font-size:13.5px}
+  a{color:var(--accent)}
+
+  /* ---- 演示面板 ---- */
+  .demo{border:1px solid var(--line); border-radius:8px; margin:20px 0; overflow:hidden}
+  .demo-bar{
+    display:flex; flex-wrap:wrap; gap:8px; align-items:center;
+    padding:10px 14px; background:var(--code-bg); border-bottom:1px solid var(--line);
+  }
+  .demo-body{padding:16px}
+  button{
+    font-family:inherit; font-size:13.5px; padding:5px 13px; border-radius:6px;
+    border:1px solid var(--line); background:var(--bg); color:var(--fg); cursor:pointer;
+  }
+  button:hover{background:#eaeef2}
+  button.primary{background:var(--accent); color:#fff; border-color:var(--accent)}
+  button.primary:hover{opacity:.88}
+  button:disabled{opacity:.45; cursor:default}
+  label.ctl{font-size:13px; color:var(--muted); display:flex; align-items:center; gap:6px}
+  label.ctl input[type=range]{width:110px; vertical-align:middle}
+  label.ctl b{color:var(--fg); font-family:ui-monospace,Consolas,monospace; min-width:52px; display:inline-block}
+  .seg{display:flex; border:1px solid var(--line); border-radius:6px; overflow:hidden}
+  .seg button{border:0; border-radius:0; border-right:1px solid var(--line)}
+  .seg button:last-child{border-right:0}
+  .seg button.on{background:var(--accent); color:#fff}
+  canvas{display:block; width:100%; background:var(--bg)}
+  .readout{
+    display:grid; grid-template-columns:repeat(auto-fit,minmax(132px,1fr)); gap:8px;
+    margin-top:12px; font-size:13px;
+  }
+  .ro{background:var(--code-bg); border:1px solid var(--line); border-radius:6px; padding:7px 10px}
+  .ro .k{color:var(--muted); font-size:12px; display:block}
+  .ro .v{font-family:ui-monospace,Consolas,monospace; font-size:14px; font-weight:600}
+  .ro.ok .v{color:#116329}
+  .ro.bad .v{color:#a40e26}
+  .legend{display:flex; flex-wrap:wrap; gap:14px; font-size:12.5px; color:var(--muted); margin-top:10px}
+  .legend i{display:inline-block; width:11px; height:11px; border-radius:2px; margin-right:5px; vertical-align:-1px}
+  .steps{font-size:13px; margin-top:12px}
+  .steps .s{
+    padding:6px 10px; border-left:3px solid transparent; border-radius:0 6px 6px 0;
+    color:var(--muted); font-family:ui-monospace,Consolas,monospace; white-space:pre-wrap;
+  }
+  .steps .s.on{background:#ddf4ff; border-left-color:var(--accent); color:var(--fg)}
+  .log{
+    margin-top:12px; max-height:150px; overflow-y:auto; background:var(--code-bg);
+    border:1px solid var(--line); border-radius:6px; padding:8px 10px;
+    font-family:ui-monospace,Consolas,monospace; font-size:12.5px; line-height:1.6;
+  }
+  .log div{white-space:pre-wrap}
+  .log .hl{color:var(--accent); font-weight:600}
+  .log .wv{color:#9a6700}
+  .log .bv{color:#a40e26; font-weight:600}
+
+  /* ---- 侧边导航 ---- */
+  h2,h3{scroll-margin-top:24px}
+  #nav{position:fixed; top:0; left:0; width:252px; height:100vh; overflow-y:auto;
+       padding:26px 14px 40px; background:var(--code-bg); border-right:1px solid var(--line);
+       font-size:13.5px; line-height:1.5; z-index:20}
+  #nav .nav-title{font-weight:600; font-size:14px; padding:0 10px 12px; margin-bottom:10px;
+       border-bottom:1px solid var(--line)}
+  #nav .nav-title span{display:block; font-weight:400; font-size:12px; color:var(--muted); margin-top:2px}
+  #nav a{display:block; padding:5px 10px; margin:1px 0; border-radius:6px; color:var(--muted);
+       text-decoration:none; border-left:3px solid transparent}
+  #nav a.lv2{color:var(--fg)}
+  #nav a.lv3{padding-left:24px; font-size:13px}
+  #nav a:hover{background:#eaeef2; color:var(--accent)}
+  #nav a.active{background:#ddf4ff; color:var(--accent); font-weight:600; border-left-color:var(--accent)}
+  body.has-nav .wrap{margin-left:252px}
+  #nav-toggle{display:none; position:fixed; top:12px; left:12px; z-index:30;
+       width:38px; height:38px; border:1px solid var(--line); border-radius:6px;
+       background:var(--bg); font-size:17px; line-height:1; cursor:pointer}
+  @media (max-width:1240px){
+    #nav{transform:translateX(-100%); transition:transform .2s ease}
+    #nav.open{transform:none; box-shadow:0 0 0 100vmax rgba(0,0,0,.25)}
+    body.has-nav .wrap{margin-left:0}
+    #nav-toggle{display:block}
+    header{padding-top:58px}
+  }
+</style>
+</head>
+<body class="has-nav">
+
+<button id="nav-toggle" title="目录">&#9776;</button>
+
+<nav id="nav">
+  <div class="nav-title">令牌桶 交互动画<span>原理 · 实现 · 判据</span></div>
+  <a class="lv2" href="#1">1. 桶的运行：注入与取用</a>
+  <a class="lv2" href="#2">2. 速率与桶深的作用</a>
+  <a class="lv2" href="#3">3. 令牌计数 vs 虚拟时间</a>
+  <a class="lv2" href="#4">4. TAT 推进逐步拆解</a>
+  <a class="lv2" href="#5">5. 超桶深的包：截断的后果</a>
+  <a class="lv2" href="#6">6. 符合性：任意窗口</a>
+  <a class="lv2" href="#7">7. raw / steady / conformant</a>
+  <a class="lv2" href="#8">8. 多流共享一个桶</a>
+  <a class="lv2" href="#9">9. 包内空隙与瓶颈转移</a>
+  <a class="lv2" href="#10">10. 速查</a>
+</nav>
+
+<div class="wrap">
+
+<header>
+<h1>令牌桶：原理与实现 交互动画</h1>
+<div class="sub">
+  dem_buck · <code>env/token_bucket.sv</code> 的可视化对照版 ·
+  配套文档 <a href="token_bucket_guide.html">token_bucket_guide.html</a>
+</div>
+</header>
+
+<p>本页把令牌桶的每个机制做成可操作的动画：拖动参数、单步执行、观察内部状态变化。每个演示下面都标出它对应 <code>token_bucket.sv</code> 的哪一段代码。</p>
+
+<div class="note">
+<p><strong>术语约定。</strong><code>R</code> = 令牌注入速率（token/s）；<code>B</code> = 桶深（token）；<code>cost</code> = 单包开销；<code>TAT</code> = 理论到达时间。本页时间单位统一用 <strong>ms</strong>，令牌单位用 <strong>byte</strong>，便于读数。</p>
+</div>
+
+<h2 id="1">1. 桶的运行：注入与取用</h2>
+
+<p>令牌以速率 <code>R</code> 持续注入一个容量为 <code>B</code> 的桶，溢出部分丢弃。每个包发送前取走 <code>cost</code> 个令牌，不够就等到够。</p>
+
+<div class="demo">
+<div class="demo-bar">
+  <button class="primary" id="d1-run">▶ 开始</button>
+  <button id="d1-step">单步发包</button>
+  <button id="d1-reset">重置</button>
+  <label class="ctl">R <input type="range" id="d1-r" min="1" max="20" value="8" step="1"><b id="d1-rv">8.0 KB/s</b></label>
+  <label class="ctl">B <input type="range" id="d1-b" min="200" max="3000" value="1000" step="100"><b id="d1-bv">1000 B</b></label>
+  <label class="ctl">到达间隔 <input type="range" id="d1-iv" min="2" max="60" value="12" step="2"><b id="d1-ivv">12 ms</b></label>
+</div>
+<div class="demo-body">
+  <canvas id="d1-cv"></canvas>
+  <div class="legend">
+    <span><i style="background:var(--tok)"></i>桶内令牌</span>
+    <span><i style="background:var(--pkt)"></i>已放行的包</span>
+    <span><i style="background:var(--wait)"></i>正在等令牌（stall）</span>
+    <span><i style="background:#d1d9e0"></i>排队中的包</span>
+  </div>
+  <div class="readout">
+    <div class="ro" id="d1-ro-tok"><span class="k">当前令牌</span><span class="v">—</span></div>
+    <div class="ro" id="d1-ro-cnt"><span class="k">放行包数</span><span class="v">0</span></div>
+    <div class="ro" id="d1-ro-cost"><span class="k">累计开销</span><span class="v">0</span></div>
+    <div class="ro" id="d1-ro-rate"><span class="k">实测速率</span><span class="v">—</span></div>
+    <div class="ro" id="d1-ro-stall"><span class="k">累计 stall</span><span class="v">0.0 ms</span></div>
+  </div>
+  <div class="log" id="d1-log"></div>
+</div>
+</div>
+
+<p>把<strong>到达间隔</strong>调小（请求变密），桶很快被抽干，此后每个包都要 stall，实测速率收敛到 <code>R</code>；把间隔调大到让平均请求速率低于 <code>R</code>，桶长期是满的，没有包需要等 —— 此时<strong>桶不是瓶颈</strong>，实测速率由到达速率决定。这就是那条关键性质：</p>
+
+<div class="formula">实际速率 = min(令牌桶上界 R, 请求到达速率)</div>
+
+<div class="warn">
+<p><strong>令牌桶是上界整形器，不是节拍器。</strong>契约 <code>cost(T) ≤ R·T + B</code> 是<strong>单侧</strong>不等式，只规定「不许更快」，不规定「必须这么快」。所以自愿 idle 不算违约，但也意味着：想用桶把速率卡在 R，必须保证请求足够密。</p>
+</div>
+
+<h2 id="2">2. 速率与桶深各管什么</h2>
+
+<p><code>R</code> 管长期平均带宽，<code>B</code> 管瞬时突发量 —— 两个旋钮互不干扰。下图是「累计放行量 vs 时间」，斜率就是速率。</p>
+
+<div class="demo">
+<div class="demo-bar">
+  <button class="primary" id="d2-run">▶ 播放</button>
+  <button id="d2-reset">重置</button>
+  <label class="ctl">R <input type="range" id="d2-r" min="2" max="20" value="8" step="1"><b id="d2-rv">8.0 KB/s</b></label>
+  <label class="ctl">B <input type="range" id="d2-b" min="200" max="6000" value="1000" step="200"><b id="d2-bv">1000 B</b></label>
+  <label class="ctl">初始令牌 <input type="range" id="d2-i" min="0" max="100" value="100" step="10"><b id="d2-iv">满桶</b></label>
+</div>
+<div class="demo-body">
+  <canvas id="d2-cv"></canvas>
+  <div class="legend">
+    <span><i style="background:var(--pkt)"></i>累计放行量 cost(t)</span>
+    <span><i style="background:var(--tok)"></i>上界 R·t + B</span>
+    <span><i style="background:var(--muted)"></i>基准 R·t</span>
+  </div>
+  <div class="readout">
+    <div class="ro" id="d2-ro-slope"><span class="k">当前段斜率</span><span class="v">—</span></div>
+    <div class="ro" id="d2-ro-raw"><span class="k">raw 平均</span><span class="v">—</span></div>
+    <div class="ro" id="d2-ro-err"><span class="k">raw 误差</span><span class="v">—</span></div>
+    <div class="ro" id="d2-ro-pred"><span class="k">理论 B/(R·T)</span><span class="v">—</span></div>
+  </div>
+</div>
+</div>
+
+<div class="good">
+<p>曲线<strong>永不越过绿线</strong>（上界 <code>R·t + B</code>），这就是符合性。开场那段陡坡是桶里的存货被一次放出，长度正是 <code>B</code>；之后斜率贴合 <code>R</code>。把「初始令牌」拉到 0，陡坡消失，曲线从一开始就贴着基准线走 —— 这正是 <code>tc_buck_base</code> 设 <code>init_tokens=0</code> 的用意。</p>
+</div>
+
+<p>注意 <code>raw 误差</code> 与 <code>理论 B/(R·T)</code> 两个读数始终贴近。这解释了为什么 <code>tc_buck_burst</code>（B=8192）在短窗口下 raw 误差高达 41% 却完全正常 —— 它衡量的是桶深占比，不是整形精度。</p>
+
+<div class="note">
+<p><strong>桶深的时间尺度是 <code>B/R</code>。</strong>它表示「攒多久的额度能一次性放出去」。例如 R=2 MB/s、B=8192 B 时 <code>B/R = 4.1 ms</code>。想让 raw 可信，窗口须满足 <code>T ≫ B/R</code>。</p>
+</div>
+
+<h2 id="3">3. 两种实现：令牌计数 vs 虚拟时间</h2>
+
+<p>同一个算法有两种写法。左边是直观的「维护 tokens 变量 + 循环等待」，右边是本项目采用的 GCRA 虚拟时间。点单步，看两边的内部状态如何演进。</p>
+
+<div class="demo">
+<div class="demo-bar">
+  <button class="primary" id="d3-step">单步发包</button>
+  <button id="d3-auto">▶ 连续</button>
+  <button id="d3-reset">重置</button>
+  <label class="ctl">R <input type="range" id="d3-r" min="2" max="20" value="8" step="1"><b id="d3-rv">8.0 KB/s</b></label>
+  <label class="ctl">B <input type="range" id="d3-b" min="200" max="2000" value="600" step="100"><b id="d3-bv">600 B</b></label>
+</div>
+<div class="demo-body">
+  <canvas id="d3-cv"></canvas>
+  <div class="readout">
+    <div class="ro" id="d3-ro-tok"><span class="k">左：tokens 变量</span><span class="v">—</span></div>
+    <div class="ro" id="d3-ro-loop"><span class="k">左：累计循环次数</span><span class="v">0</span></div>
+    <div class="ro" id="d3-ro-tat"><span class="k">右：TAT − now</span><span class="v">—</span></div>
+    <div class="ro" id="d3-ro-der"><span class="k">两者令牌差</span><span class="v">0.000</span></div>
+  </div>
+  <div class="log" id="d3-log"></div>
+</div>
+</div>
+
+<p>两者的等价关系是一个恒等式 —— 右侧读数 <code>TAT − now</code> 乘以 R 再被 B 减去，恰好等于左侧的 <code>tokens</code>：</p>
+
+<div class="formula">tokens(t) = B − (TAT − t) · R</div>
+
+<p>于是「令牌足够」的判据可以改写成纯时间比较，<strong>最早放行时刻一次闭式算出</strong>：</p>
+
+<div class="formula">tokens ≥ cost &nbsp;⟺&nbsp; t ≥ TAT − (B − cost)/R</div>
+
+<table>
+<thead><tr><th>方面</th><th>令牌计数 + 循环等待</th><th>GCRA 虚拟时间</th></tr></thead>
+<tbody>
+<tr><td>等待时间</td><td><code>while</code> 逐次逼近，上面计数器会涨</td><td>一次求解，无循环</td></tr>
+<tr><td>浮点误差</td><td>反复累加 + 上限裁剪，会漂移</td><td>TAT 只按精确 <code>cost/R</code> 递增</td></tr>
+<tr><td>边界兜底</td><td>需防零延时死循环</td><td>不需要</td></tr>
+<tr><td>仿真开销</td><td>每包可能多次唤醒</td><td>每包最多一次 <code>#delay</code></td></tr>
+<tr><td>后台线程</td><td>常需 <code>forever</code> 补令牌</td><td>惰性计算，空闲零开销</td></tr>
+</tbody>
+</table>
+
+<h2 id="4">4. TAT 推进：四行代码逐步拆解</h2>
+
+<p>这是 <code>consume()</code> 的核心临界区。下面把每个包的处理拆成 4 步，逐步高亮并同步更新时间轴。</p>
+
+<pre><code>sem.get(1);
+t_ns        = real'($realtime);
+earliest_ns = tat_ns - tok2ns(cfg.bucket_size - need);
+start_ns    = (earliest_ns &gt; t_ns) ? earliest_ns : t_ns;
+tat_ns      = ((start_ns &gt; tat_ns) ? start_ns : tat_ns) + tok2ns(need);
+sem.put(1);</code></pre>
+
+<div class="demo">
+<div class="demo-bar">
+  <button class="primary" id="d4-next">下一步 ▸</button>
+  <button id="d4-pkt">下一个包 ⏭</button>
+  <button id="d4-reset">重置</button>
+  <label class="ctl">本包 cost <input type="range" id="d4-c" min="40" max="900" value="200" step="20"><b id="d4-cv">200 B</b></label>
+  <label class="ctl">距上包 <input type="range" id="d4-g" min="0" max="120" value="10" step="5"><b id="d4-gv">10 ms</b></label>
+</div>
+<div class="demo-body">
+  <canvas id="d4-cv-main"></canvas>
+  <div class="steps" id="d4-steps">
+    <div class="s" data-i="0">① t_ns = $realtime                                  读当前时刻</div>
+    <div class="s" data-i="1">② earliest_ns = tat_ns - (B - need)/R               令牌够了的最早时刻</div>
+    <div class="s" data-i="2">③ start_ns = max(earliest_ns, t_ns)                实际放行时刻</div>
+    <div class="s" data-i="3">④ tat_ns = max(start_ns, tat_ns) + need/R          预约时隙, 扣未来额度</div>
+  </div>
+  <div class="readout">
+    <div class="ro" id="d4-ro-t"><span class="k">t_ns (now)</span><span class="v">—</span></div>
+    <div class="ro" id="d4-ro-e"><span class="k">earliest_ns</span><span class="v">—</span></div>
+    <div class="ro" id="d4-ro-s"><span class="k">start_ns</span><span class="v">—</span></div>
+    <div class="ro" id="d4-ro-tat"><span class="k">tat_ns</span><span class="v">—</span></div>
+    <div class="ro" id="d4-ro-tok"><span class="k">放行前令牌</span><span class="v">—</span></div>
+    <div class="ro" id="d4-ro-st"><span class="k">本包 stall</span><span class="v">—</span></div>
+  </div>
+  <div class="log" id="d4-log"></div>
+</div>
+</div>
+
+<h3>两层 max 分别防什么</h3>
+
+<table>
+<thead><tr><th>位置</th><th>作用</th><th>去掉会怎样</th></tr></thead>
+<tbody>
+<tr><td>③ <code>max(earliest_ns, t_ns)</code></td><td>令牌已够时取当前时刻，立即放行</td><td><code>earliest</code> 可能是过去时刻，算出负延时</td></tr>
+<tr><td>④ <code>max(start_ns, tat_ns)</code></td><td>空闲期不让 TAT 落后于现在</td><td>长时间空闲后 TAT 远在过去，桶会「攒出」<strong>远超 B</strong> 的额度，突发上限失守</td></tr>
+</tbody>
+</table>
+
+<p>把「距上包」拉到最大（长时间空闲）再单步，可以看到 ④ 的内层 max 生效：<code>tat_ns</code> 被抬到 <code>start_ns</code>，而不是从那个早已过期的旧值继续累加。这正是「桶满即溢出」在虚拟时间下的等价表达。</p>
+
+<div class="note">
+<p>这四行<strong>不消耗仿真时间</strong>，所以临界区是真正的 O(1)。等待 <code>#delay</code> 放在 <code>sem.put()</code> 之后执行 —— 若在持锁期间等待，一条流等令牌就会锁住整个桶，造成队头阻塞（见<a href="#8">第 8 节</a>）。</p>
+</div>
+
+<h2 id="5">5. 超桶深的包：截断为什么是错的</h2>
+
+<p>当 <code>cost &gt; B</code>，一种常见的「顺手」写法是把开销截断成 B 再计费。下面并排跑两个桶，输入完全相同，只有计费方式不同。</p>
+
+<div class="demo">
+<div class="demo-bar">
+  <button class="primary" id="d5-run">▶ 播放</button>
+  <button id="d5-reset">重置</button>
+  <label class="ctl">B <input type="range" id="d5-b" min="200" max="1200" value="400" step="100"><b id="d5-bv">400 B</b></label>
+  <label class="ctl">大包比例 <input type="range" id="d5-p" min="0" max="80" value="30" step="10"><b id="d5-pv">30%</b></label>
+</div>
+<div class="demo-body">
+  <canvas id="d5-cv"></canvas>
+  <div class="legend">
+    <span><i style="background:var(--bad-line)"></i>截断计费（错）</span>
+    <span><i style="background:var(--pkt)"></i>实际计费（本项目）</span>
+    <span><i style="background:var(--muted)"></i>基准 R·t</span>
+  </div>
+  <div class="readout">
+    <div class="ro bad" id="d5-ro-tr"><span class="k">截断：实测速率</span><span class="v">—</span></div>
+    <div class="ro" id="d5-ro-ta"><span class="k">截断：误差</span><span class="v">—</span></div>
+    <div class="ro ok" id="d5-ro-fr"><span class="k">实际：实测速率</span><span class="v">—</span></div>
+    <div class="ro" id="d5-ro-fa"><span class="k">实际：误差</span><span class="v">—</span></div>
+    <div class="ro" id="d5-ro-under"><span class="k">截断少收费合计</span><span class="v">0</span></div>
+  </div>
+</div>
+</div>
+
+<div class="warn">
+<p>红线斜率<strong>持续高于</strong>基准线：每个大包都被打了折，少收的那部分永久性地变成了超额带宽，<strong>长期速率高于配置值 —— 整形器失守</strong>。把「大包比例」拉高，偏差线性放大。</p>
+</div>
+
+<p>本项目按实际开销计费，不做截断。GCRA 下这天然成立：<code>cost</code> 越大，TAT 被推得越远，该包自己承担更长等待，速率自动摊平。<code>effective_cost()</code> 只发一条 warning 而不改数值：</p>
+
+<pre><code>if (cost &gt; cfg.bucket_size) begin
+    if (cfg.allow_oversize)
+        `uvm_warning("TB_OVERSIZE", ...)   // 放行, 但按实际开销计费
+    else
+        `uvm_fatal("TB_OVERSIZE", ...)
+end
+return cost;                               // 关键: 返回原值</code></pre>
+
+<p>代价是这个包会短暂「借支未来额度」，所以 <code>current_tokens()</code> <strong>允许返回负值</strong> —— 它正确反映了欠账状态。桶只裁上限、不裁下限：</p>
+
+<pre><code>tok = cfg.bucket_size - (tat_ns - $realtime) * R / 1e9;
+return (tok &gt; cfg.bucket_size) ? cfg.bucket_size : tok;   // 只裁上限</code></pre>
+
+<h2 id="6">6. 符合性：为什么必须覆盖任意窗口</h2>
+
+<p>契约要求 <code>cost ≤ R·T + B</code> 对<strong>任意</strong>窗口成立。下面的曲线是 <code>f(t) = cost(t) − R·t</code>，它把「超额」这件事画成了一张图：任意窗口的超额就是 <code>f</code> 在该区间的涨幅。</p>
+
+<div class="demo">
+<div class="demo-bar">
+  <button class="primary" id="d6-run">▶ 播放</button>
+  <button id="d6-reset">重置</button>
+  <label class="ctl">B <input type="range" id="d6-b" min="300" max="2000" value="800" step="100"><b id="d6-bv">800 B</b></label>
+  <div class="seg" id="d6-mode">
+    <button class="on" data-m="0">含中途空闲</button>
+    <button data-m="1">持续满载</button>
+  </div>
+</div>
+<div class="demo-body">
+  <canvas id="d6-cv"></canvas>
+  <div class="legend">
+    <span><i style="background:var(--pkt)"></i>f(t) = cost(t) − R·t</span>
+    <span><i style="background:var(--ok-line)"></i>running 最小值 f_min</span>
+    <span><i style="background:var(--warn-line)"></i>当前最大超额区间</span>
+  </div>
+  <div class="readout">
+    <div class="ro" id="d6-ro-f"><span class="k">f(t)</span><span class="v">—</span></div>
+    <div class="ro" id="d6-ro-min"><span class="k">f_min</span><span class="v">—</span></div>
+    <div class="ro" id="d6-ro-ex"><span class="k">max_excess</span><span class="v">—</span></div>
+    <div class="ro" id="d6-ro-naive"><span class="k">只看首包起点</span><span class="v">—</span></div>
+    <div class="ro" id="d6-ro-ok"><span class="k">conformant</span><span class="v">—</span></div>
+  </div>
+</div>
+</div>
+
+<p>选「含中途空闲」可以看到两个读数分道扬镳：空闲期 <code>f</code> 被持续压低，<code>f_min</code> 跟着下探；随后一轮突发让 <code>f</code> 抬升，真实超额是<strong>这一段的涨幅</strong>。而「只看首包起点」的朴素算法完全漏掉了它。</p>
+
+<div class="formula">任意窗口最大超额 = max<sub>t</sub> [ f(t) − min<sub>τ≤t</sub> f(τ) ]</div>
+
+<p>所以只要维护 <code>f</code> 的 running 最小值，一次比较就能覆盖所有窗口，不必存历史，代价 O(1)：</p>
+
+<pre><code>f_before = total_cost - span_s * rate;
+if (f_before &lt; f_min) f_min = f_before;      // 先更新 running 最小值
+
+total_cost += add_cost;
+
+f_after = total_cost - span_s * rate;
+if ((f_after - f_min) &gt; max_excess)
+    max_excess = f_after - f_min;             // 报告里的 burst used</code></pre>
+
+<div class="note">
+<p><strong>加 cost 前后各算一次 <code>f</code>，顺序不能颠倒。</strong>加之前的值用于更新 <code>f_min</code>（窗口左端取在本包<em>之前</em>），加之后的值用于更新 <code>max_excess</code>（右端取在本包<em>之后</em>）。颠倒会让同一个包既算进左端又算进右端，低估超额。</p>
+</div>
+
+<h2 id="7">7. 三个指标：raw、steady、conformant</h2>
+
+<p>报告里这三个数回答的是不同问题，混用是最常见的误解来源。下面这个演示可以人为注入「背压 / 总线忙」—— 注意三个指标的反应完全不同。</p>
+
+<div class="demo">
+<div class="demo-bar">
+  <button class="primary" id="d7-run">▶ 播放</button>
+  <button id="d7-reset">重置</button>
+  <label class="ctl">B <input type="range" id="d7-b" min="200" max="4000" value="1000" step="200"><b id="d7-bv">1000 B</b></label>
+  <label class="ctl">额外总线延时 <input type="range" id="d7-x" min="0" max="80" value="0" step="10"><b id="d7-xv">0%</b></label>
+</div>
+<div class="demo-body">
+  <canvas id="d7-cv"></canvas>
+  <div class="legend">
+    <span><i style="background:var(--pkt)"></i>raw 瞬时值</span>
+    <span><i style="background:var(--ok-line)"></i>steady 瞬时值</span>
+    <span><i style="background:var(--muted)"></i>配置 R</span>
+  </div>
+  <div class="readout">
+    <div class="ro" id="d7-ro-raw"><span class="k">raw 平均</span><span class="v">—</span></div>
+    <div class="ro" id="d7-ro-rawe"><span class="k">raw 误差</span><span class="v">—</span></div>
+    <div class="ro" id="d7-ro-std"><span class="k">steady</span><span class="v">—</span></div>
+    <div class="ro" id="d7-ro-stde"><span class="k">steady 误差</span><span class="v">—</span></div>
+    <div class="ro" id="d7-ro-ex"><span class="k">burst used</span><span class="v">—</span></div>
+    <div class="ro" id="d7-ro-ok"><span class="k">conformant</span><span class="v">—</span></div>
+  </div>
+</div>
+</div>
+
+<table>
+<thead><tr><th>指标</th><th>分子 / 分母</th><th>回答什么</th><th>何时失效</th></tr></thead>
+<tbody>
+<tr><td><code>measured</code> (raw)</td><td><code>total_cost</code> / 全窗口</td><td>长期带宽占用是否达标</td><td><code>T</code> 不够长时偏高 <code>B/(R·T)</code>；有背压时偏低</td></tr>
+<tr><td><code>steady</code></td><td>稳态段开销 / 稳态段时长</td><td>令牌发放逻辑是否准确</td><td>有背压或包内空隙时偏低</td></tr>
+<tr><td><code>conformant</code></td><td colspan="1"><code>max_excess ≤ B×1.01</code></td><td>是否违反契约</td><td><strong>从不失效</strong>，不依赖窗口口径</td></tr>
+</tbody>
+</table>
+
+<p>把「额外总线延时」从 0 拉到 80%：raw 和 steady 双双下滑，而 <code>conformant</code> 稳稳是 YES。</p>
+
+<div class="warn">
+<p><strong>两个 rate 函数的分母是墙钟时间，分不清「等令牌」与「等总线」。</strong>它们看到的只是「两次放行之间隔了多久」，无法区分这段时间是桶在限速还是下游在堵。所以判整形器对不对，<strong>先看 <code>conformant</code> 与 <code>steady</code>，再看 raw，且必须确认 <code>T ≫ B/R</code></strong>。</p>
+</div>
+
+<p>「稳态起点」的判据很干净：<strong>首次 stall</strong>。桶里还有存货时不会 stall，一旦 stall 说明存货已空，此后系统完全由 R 支配。</p>
+
+<pre><code>if (stalled &amp;&amp; !steady_valid) begin
+    steady_valid      = 1;
+    steady_start_time = $realtime;
+    steady_start_cost = total_cost;
+    steady_start_cnt  = grant_cnt;
+end</code></pre>
+
+<h2 id="8">8. 多流共享一个桶</h2>
+
+<p>两条 sequence 共用一个桶时，总流量应受限于 <code>R</code>。关键在于临界区怎么写 —— 下面对比「锁内等待」与「锁外等待」。</p>
+
+<div class="demo">
+<div class="demo-bar">
+  <button class="primary" id="d8-run">▶ 播放</button>
+  <button id="d8-reset">重置</button>
+  <div class="seg" id="d8-mode">
+    <button class="on" data-m="0">锁外等待（本项目）</button>
+    <button data-m="1">锁内等待（队头阻塞）</button>
+  </div>
+  <label class="ctl">流 B 的包长 <input type="range" id="d8-l" min="40" max="800" value="400" step="40"><b id="d8-lv">400 B</b></label>
+</div>
+<div class="demo-body">
+  <canvas id="d8-cv"></canvas>
+  <div class="legend">
+    <span><i style="background:var(--pkt)"></i>流 A</span>
+    <span><i style="background:#8250df"></i>流 B</span>
+    <span><i style="background:var(--wait)"></i>等令牌</span>
+    <span><i style="background:var(--bad-line)"></i>等锁（被阻塞）</span>
+  </div>
+  <div class="readout">
+    <div class="ro" id="d8-ro-a"><span class="k">流 A 吞吐</span><span class="v">—</span></div>
+    <div class="ro" id="d8-ro-b"><span class="k">流 B 吞吐</span><span class="v">—</span></div>
+    <div class="ro" id="d8-ro-sum"><span class="k">合计吞吐</span><span class="v">—</span></div>
+    <div class="ro" id="d8-ro-lock"><span class="k">等锁总时长</span><span class="v">—</span></div>
+    <div class="ro" id="d8-ro-ok"><span class="k">conformant</span><span class="v">—</span></div>
+  </div>
+</div>
+</div>
+
+<p>两种模式下<strong>合计吞吐都收敛到 R</strong> —— 总速率受限这一点不受影响。差别在公平性与仿真行为：锁内等待时，一条流在 <code>#delay</code> 期间霸占着锁，另一条流连「预约时隙」都做不到，红色的等锁条会堆积起来。</p>
+
+<pre><code>sem.get(1);
+  // 纯运算: 算 start_ns, 推进 tat_ns —— 不消耗仿真时间
+sem.put(1);
+
+delay_ns = start_ns - t_ns;
+if (delay_ns &gt; 0.0) #(delay_ns * 1ns);   // 等待放在锁外</code></pre>
+
+<div class="note">
+<p>SV <code>semaphore</code> 的唤醒顺序并非 LRM 保证的 FIFO，这也是把临界区压到 O(1) 的另一个理由：<strong>锁的持有时间趋于零，请求实际按到达顺序拿到时隙</strong>。</p>
+</div>
+
+<h2 id="9">9. 包内空隙与瓶颈转移</h2>
+
+<p>一个包由多个 beat 组成。<code>beat_gap()</code> 允许在 beat 之间插空闲拍 —— 这会改变什么？下面的时序图把一个包的微观节奏画出来。</p>
+
+<div class="demo">
+<div class="demo-bar">
+  <button class="primary" id="d9-run">▶ 播放</button>
+  <button id="d9-reset">重置</button>
+  <label class="ctl">插隙概率 <input type="range" id="d9-p" min="0" max="100" value="40" step="10"><b id="d9-pv">40%</b></label>
+  <label class="ctl">空隙拍数 <input type="range" id="d9-g" min="1" max="12" value="3" step="1"><b id="d9-gv">1~3</b></label>
+</div>
+<div class="demo-body">
+  <canvas id="d9-cv"></canvas>
+  <div class="legend">
+    <span><i style="background:var(--pkt)"></i>valid &amp;&amp; ready（有效 beat）</span>
+    <span><i style="background:#d1d9e0"></i>包内空隙（valid 拉低）</span>
+    <span><i style="background:var(--ok-line)"></i>DUT FIFO 水位</span>
+    <span><i style="background:var(--bad-line)"></i>背压（ready 拉低）</span>
+  </div>
+  <div class="readout">
+    <div class="ro" id="d9-ro-beat"><span class="k">有效 beat 数</span><span class="v">0</span></div>
+    <div class="ro" id="d9-ro-byte"><span class="k">搬运字节</span><span class="v">0</span></div>
+    <div class="ro" id="d9-ro-dc"><span class="k">总线占空比</span><span class="v">—</span></div>
+    <div class="ro" id="d9-ro-fifo"><span class="k">FIFO 峰值</span><span class="v">0 / 16</span></div>
+    <div class="ro" id="d9-ro-bp"><span class="k">背压拍数</span><span class="v">0</span></div>
+  </div>
+</div>
+</div>
+
+<p>插隙概率设 0 时输入背靠背（4 B/2 ns = 2e9 B/s），DUT 排空速率是 4 B/4 ns = 1e9 B/s，恰为线速一半，于是 FIFO 被填满并触发背压。把概率拉到 100%、空隙拍数拉大，输入降到排空速率以下 —— <strong>FIFO 峰值与背压拍数双双归零</strong>。</p>
+
+<div class="warn">
+<p><strong>这就是「不要让每个 beat 都插空隙」的原因。</strong>背压路径与 driver 等 <code>ready</code> 的分支会双双失去覆盖。所以空隙必须随机、并保留相当比例的 0，让背靠背片段与空隙片段混合出现 —— <code>buck_gap_driver</code> 默认 <code>gap_percent=40</code> 正是这个意思。</p>
+</div>
+
+<h3>各层的受影响情况</h3>
+
+<table>
+<thead><tr><th>层次</th><th>受影响</th><th>原因</th></tr></thead>
+<tbody>
+<tr><td>monitor / DUT 计数</td><td>否</td><td>二者只在 <code>valid &amp;&amp; ready</code> 成立时动作，空闲拍被天然忽略</td></tr>
+<tr><td><code>is_conformant()</code></td><td>否</td><td>不依赖窗口口径</td></tr>
+<tr><td>raw / steady</td><td>小空隙可忽略</td><td>线速远高于 R，裕量很大；超出后 driver 成瓶颈，两项都偏低</td></tr>
+<tr><td>背压 / FIFO 覆盖</td><td><strong>是</strong></td><td>见上</td></tr>
+</tbody>
+</table>
+
+<div class="note">
+<p><strong>空隙只能插在握手完成之后。</strong><code>valid</code> 一旦拉高，在 <code>ready</code> 到来前不得回撤 —— 这是 valid/ready 协议的硬性要求。所以实现上必须等 <code>do...while(ready !== 1)</code> 退出后再拉低 <code>valid</code>。</p>
+</div>
+
+<p>回归实测（<code>tc_buck_beatgap</code> vs <code>tc_buck_base</code>，同配置）印证了上表：<strong>beat/byte 逐位相同</strong>（7106 / 28137），仿真时长仅 +3.8%，<code>conformant</code> 都是 YES。</p>
+
+<h2 id="10">10. 速查</h2>
+
+<table>
+<thead><tr><th>现象</th><th>先看哪个</th><th>常见原因</th></tr></thead>
+<tbody>
+<tr><td>raw 误差很大但 steady 准</td><td><code>window</code> 与 <code>B/R</code> 的比值</td><td>窗口太短，桶深占比被当成了误差</td></tr>
+<tr><td>raw 与 steady 双双偏低</td><td>是否有背压 / 包内空隙</td><td>瓶颈已转移到总线或下游，不是桶</td></tr>
+<tr><td><code>conformant = NO</code></td><td><code>burst used</code> 超了多少</td><td>真正的整形失守：截断计费、TAT 回退、桶深配置不符</td></tr>
+<tr><td>长期速率高于配置值</td><td>有无 oversize 包被截断</td><td>大包打折，见<a href="#5">第 5 节</a></td></tr>
+<tr><td>多流合计超过 R</td><td>临界区是否原子</td><td>时隙预约未加锁，两条流拿到重叠时隙</td></tr>
+<tr><td>背压路径没覆盖</td><td>插隙概率</td><td>输入速率降到 DUT 排空速率以下，见<a href="#9">第 9 节</a></td></tr>
+</tbody>
+</table>
+
+<div class="good">
+<p><strong>一句话版。</strong><code>conformant</code> 是唯一在任何情形下都严格成立的硬判据；<code>steady</code> 判整形逻辑；<code>raw</code> 判带宽达标但必须先确认窗口足够长。</p>
+</div>
+
+<footer>
+dem_buck · 令牌桶流控发包器 · 交互动画<br>
+所有演示均为纯前端模拟，算法与 <code>env/token_bucket.sv</code> 一致，可对照源码阅读。
+</footer>
+
+</div><!-- /wrap -->
+
+<script>
+/* ============ 公共工具 ============ */
+const DPR = Math.min(window.devicePixelRatio || 1, 2);
+function CW(cv){ return Math.max(320, cv.clientWidth || 600); }
+function fitCanvas(cv, h){
+  const w = CW(cv);
+  cv.width = w * DPR; cv.height = h * DPR;
+  cv.style.height = h + 'px';
+  const c = cv.getContext('2d');
+  c.setTransform(DPR,0,0,DPR,0,0);
+  return c;
+}
+function css(n){ return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
+function rrect(c,x,y,w,h,r){
+  r = Math.max(0, Math.min(r, w/2, h/2));
+  c.beginPath();
+  c.moveTo(x+r,y); c.arcTo(x+w,y,x+w,y+h,r); c.arcTo(x+w,y+h,x,y+h,r);
+  c.arcTo(x,y+h,x,y,r); c.arcTo(x,y,x+w,y,r); c.closePath();
+}
+function fmt(v,d){ return Number(v).toFixed(d===undefined?1:d); }
+function logLine(box, html, cls){
+  const d = document.createElement('div');
+  if (cls) d.className = cls;
+  d.innerHTML = html;
+  box.appendChild(d);
+  box.scrollTop = box.scrollHeight;
+  while (box.childElementCount > 220) box.removeChild(box.firstChild);
+}
+function setRo(el, v, state){
+  el.querySelector('.v').textContent = v;
+  el.classList.remove('ok','bad');
+  if (state) el.classList.add(state);
+}
+
+/* ============ 令牌桶模型（算法与 token_bucket.sv 逐行一致） ============ */
+/* 单位: 时间 ms, 令牌 byte; R 以 KB/s 给出, 数值上恰等于 byte/ms */
+class Bucket {
+  constructor(R, B, initTok, t0){
+    this.R = R; this.B = B;
+    let it = (initTok === undefined || initTok === null) ? B : initTok;
+    if (it > B) it = B;
+    this.tat = (t0 || 0) + (B - it) / R;            // configure(): 初始令牌反折成 TAT
+    this.totalCost = 0; this.grantCnt = 0;
+    this.first = -1; this.last = 0;
+    this.fmin = 0; this.maxExcess = 0;
+    this.steadyValid = false; this.steadyT = 0; this.steadyCost = 0;
+  }
+  tok2ms(tok){ return tok / this.R; }               // tok2ns()
+  /* consume() 的锁内四行: 纯运算, 不消耗时间 */
+  reserve(t, cost){
+    const tokBefore = this.tokens(t);
+    const earliest  = this.tat - this.tok2ms(this.B - cost);
+    const start     = (earliest > t) ? earliest : t;
+    const tatHit    = (start > this.tat);           // 内层 max 是否生效
+    this.tat        = (tatHit ? start : this.tat) + this.tok2ms(cost);
+    const delay     = start - t;
+    const stalled   = delay > 1e-9;
+    if (stalled && !this.steadyValid){              // 稳态起点 = 首次 stall
+      this.steadyValid = true; this.steadyT = start; this.steadyCost = this.totalCost;
+    }
+    return {earliest:earliest, start:start, delay:delay, stalled:stalled,
+            tokBefore:tokBefore, tat:this.tat, tatHit:tatHit};
+  }
+  /* account(): running 最小值, 覆盖任意窗口 */
+  account(t, cost){
+    if (this.first < 0) this.first = t;
+    if (t > this.last) this.last = t;
+    const span = this.last - this.first;
+    const fb = this.totalCost - span * this.R;
+    if (fb < this.fmin) this.fmin = fb;             // 先更新 f_min
+    this.totalCost += cost;
+    const fa = this.totalCost - span * this.R;
+    if (fa - this.fmin > this.maxExcess) this.maxExcess = fa - this.fmin;
+    this.grantCnt++;
+    return {f:fa, span:span};
+  }
+  tokens(t){                                        // current_tokens(): 只裁上限
+    const tok = this.B - (this.tat - t) * this.R;
+    return tok > this.B ? this.B : tok;
+  }
+  conformant(){ return this.maxExcess <= this.B * 1.01; }
+}
+function lcg(seed){
+  let s = seed >>> 0;
+  return function(){ s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+}
+function hline(c, x0, x1, y, color, dash){
+  c.save(); c.strokeStyle = color; c.lineWidth = 1;
+  if (dash) c.setLineDash(dash);
+  c.beginPath(); c.moveTo(x0, y); c.lineTo(x1, y); c.stroke(); c.restore();
+}
+function label(c, txt, x, y, color, align, size){
+  c.save(); c.fillStyle = color || css('--muted');
+  c.font = (size || 11) + 'px ui-monospace,Consolas,monospace';
+  c.textAlign = align || 'left'; c.textBaseline = 'middle';
+  c.fillText(txt, x, y); c.restore();
+}
+const REDRAW = [];
+addEventListener('resize', () => REDRAW.forEach(f => f()));
+/* 首屏布局完成后再量一次宽度, 避免初次 clientWidth 为 0 */
+addEventListener('load', () => REDRAW.forEach(f => f()));
+
+/* ============ 1. 桶的运行 ============ */
+(function(){
+  const cv = document.getElementById('d1-cv'), H = 252;
+  const sR = document.getElementById('d1-r'), sB = document.getElementById('d1-b'),
+        sI = document.getElementById('d1-iv');
+  const log = document.getElementById('d1-log');
+  const ro = {
+    tok: document.getElementById('d1-ro-tok'), cnt: document.getElementById('d1-ro-cnt'),
+    cost: document.getElementById('d1-ro-cost'), rate: document.getElementById('d1-ro-rate'),
+    stall: document.getElementById('d1-ro-stall')
+  };
+  let c = fitCanvas(cv, H), st, running = false, raf = 0, prevReal = 0;
+  const SPEED = 0.12;            // 1 ms 实时 => 0.12 ms 仿真
+
+  function P(){ return {R:+sR.value, B:+sB.value, iv:+sI.value}; }
+  function syncLab(){
+    const p = P();
+    document.getElementById('d1-rv').textContent = fmt(p.R) + ' KB/s';
+    document.getElementById('d1-bv').textContent = p.B + ' B';
+    document.getElementById('d1-ivv').textContent = p.iv + ' ms';
+  }
+  function reset(){
+    const p = P();
+    st = {bk:new Bucket(p.R, p.B, p.B), t:0, pend:[], cur:null, nextArr:0,
+          id:0, hist:[], ev:[], stall:0, rnd:lcg(20240917)};
+    log.innerHTML = '';
+    logLine(log, '桶初始化: R=' + fmt(p.R) + ' B/ms, B=' + p.B + ' B, 初始满桶', 'hl');
+    st.hist.push({t:0, tok:p.B});
+    paint();
+  }
+  function newPkt(){
+    const cost = Math.round(60 + st.rnd() * 240);
+    return {id:++st.id, cost:cost, arr:st.t};
+  }
+  /* 事件驱动推进到 t1 */
+  function advance(t1){
+    const p = P();
+    for (let guard = 0; guard < 4000; guard++){
+      let te = Infinity, kind = null;
+      if (st.cur){ te = st.cur.start; kind = 'grant'; }
+      else if (st.pend.length){ te = Math.max(st.t, st.pend[0].arr); kind = 'take'; }
+      if (st.nextArr < te){ te = st.nextArr; kind = 'arrive'; }
+      if (te > t1) break;
+      if (te > st.t) st.t = te;
+      if (kind === 'arrive'){
+        const pk = newPkt(); pk.arr = st.t;
+        st.pend.push(pk); st.nextArr = st.t + p.iv;
+      } else if (kind === 'take'){
+        const pk = st.pend.shift();
+        const r = st.bk.reserve(st.t, pk.cost);
+        st.cur = {pkt:pk, start:r.start, t0:st.t, stalled:r.stalled, tok:r.tokBefore};
+        if (r.stalled){
+          st.stall += r.delay;
+          logLine(log, '#' + pk.id + ' cost=' + pk.cost + '  令牌 ' + fmt(r.tokBefore) +
+                  ' < cost → stall ' + fmt(r.delay, 2) + ' ms', 'wv');
+        } else {
+          logLine(log, '#' + pk.id + ' cost=' + pk.cost + '  令牌 ' + fmt(r.tokBefore) +
+                  ' ≥ cost → 立即放行');
+        }
+      } else {
+        const cu = st.cur;
+        st.bk.account(st.t, cu.pkt.cost);
+        st.ev.push({t:st.t, cost:cu.pkt.cost, t0:cu.t0, stalled:cu.stalled});
+        if (st.ev.length > 400) st.ev.shift();
+        st.cur = null;
+      }
+    }
+    if (t1 > st.t) st.t = t1;
+    st.hist.push({t:st.t, tok:Math.max(0, st.bk.tokens(st.t))});
+    const win = 22 * P().iv;
+    while (st.hist.length > 2 && st.hist[1].t < st.t - win) st.hist.shift();
+  }
+  function paint(){
+    const p = P(), W = CW(cv);
+    c.clearRect(0, 0, W, H);
+    const tok = Math.max(0, Math.min(p.B, st.bk.tokens(st.t)));
+    /* ---- 桶 ---- */
+    const bx = 16, by = 22, bw = 54, bh = 92;
+    c.strokeStyle = css('--line'); c.lineWidth = 1.5;
+    rrect(c, bx, by, bw, bh, 6); c.stroke();
+    const fh = bh * tok / p.B;
+    c.save(); rrect(c, bx, by, bw, bh, 6); c.clip();
+    c.fillStyle = css('--tok'); c.globalAlpha = .85;
+    c.fillRect(bx, by + bh - fh, bw, fh); c.restore();
+    label(c, 'R = ' + fmt(p.R) + ' B/ms ↓', bx, by - 10, css('--tok'), 'left', 11);
+    label(c, fmt(tok, 0), bx + bw / 2, by + bh + 12, css('--fg'), 'center', 12);
+    label(c, '/ ' + p.B, bx + bw / 2, by + bh + 26, css('--muted'), 'center', 11);
+    /* ---- 队列 / 当前包 ---- */
+    let qx = bx + bw + 28;
+    label(c, '请求队列', qx, by - 10, css('--muted'), 'left', 11);
+    if (st.cur){
+      const cu = st.cur, wait = cu.start > st.t;
+      c.fillStyle = wait ? css('--wait') : css('--pkt');
+      rrect(c, qx, by + 4, 46, 30, 4); c.fill();
+      label(c, '#' + cu.pkt.id, qx + 23, by + 13, '#fff', 'center', 11);
+      label(c, cu.pkt.cost + 'B', qx + 23, by + 26, '#fff', 'center', 10);
+      if (wait) label(c, '等令牌 ' + fmt(cu.start - st.t, 1) + ' ms',
+                      qx, by + 48, css('--warn-line'), 'left', 11);
+      qx += 54;
+    }
+    for (let i = 0; i < Math.min(st.pend.length, 8); i++){
+      c.fillStyle = '#d1d9e0';
+      rrect(c, qx, by + 4, 30, 30, 4); c.fill();
+      label(c, st.pend[i].cost + '', qx + 15, by + 19, css('--muted'), 'center', 10);
+      qx += 34;
+    }
+    if (st.pend.length > 8) label(c, '+' + (st.pend.length - 8), qx + 4, by + 19, css('--muted'), 'left', 11);
+    label(c, 't = ' + fmt(st.t, 1) + ' ms', W - 4, by - 10, css('--muted'), 'right', 11);
+    /* ---- 令牌水位曲线 ---- */
+    const gx = 44, gy = 142, gw = W - gx - 10, gh = 96;
+    const win = 22 * p.iv;
+    const x0 = st.t < win ? 0 : st.t - win, x1 = x0 + win;
+    const X = t => gx + (t - x0) / win * gw, Y = v => gy + gh - gh * Math.min(1, v / p.B);
+    c.strokeStyle = css('--line'); c.strokeRect(gx, gy, gw, gh);
+    hline(c, gx, gx + gw, Y(p.B), css('--line'), [3, 3]);
+    label(c, 'B', gx - 6, Y(p.B), css('--muted'), 'right', 10);
+    label(c, '0', gx - 6, gy + gh, css('--muted'), 'right', 10);
+    label(c, '桶内令牌', gx + 4, gy - 8, css('--muted'), 'left', 11);
+    /* 放行事件 */
+    st.ev.forEach(e => {
+      if (e.t < x0) return;
+      const h = Math.min(gh, gh * e.cost / p.B);
+      c.fillStyle = css('--pkt'); c.globalAlpha = .5;
+      c.fillRect(X(e.t) - 1.5, gy + gh - h, 3, h);
+      c.globalAlpha = 1;
+      if (e.stalled && e.t0 >= x0){
+        c.fillStyle = css('--wait'); c.globalAlpha = .28;
+        c.fillRect(X(e.t0), gy, Math.max(1, X(e.t) - X(e.t0)), gh);
+        c.globalAlpha = 1;
+      }
+    });
+    /* 水位折线 */
+    c.strokeStyle = css('--tok'); c.lineWidth = 1.8; c.beginPath();
+    let started = false;
+    st.hist.forEach(h => {
+      if (h.t < x0) return;
+      const x = X(h.t), y = Y(Math.max(0, h.tok));
+      started ? c.lineTo(x, y) : (c.moveTo(x, y), started = true);
+    });
+    c.stroke(); c.lineWidth = 1;
+    /* ---- 读数 ---- */
+    setRo(ro.tok, fmt(tok, 1) + ' B');
+    setRo(ro.cnt, st.bk.grantCnt + '');
+    setRo(ro.cost, fmt(st.bk.totalCost, 0) + ' B');
+    if (st.t > 0){
+      const rate = st.bk.totalCost / st.t;
+      setRo(ro.rate, fmt(rate, 2) + ' B/ms', rate <= p.R * 1.5 ? 'ok' : 'bad');
+    } else setRo(ro.rate, '—');
+    setRo(ro.stall, fmt(st.stall, 1) + ' ms');
+  }
+  function loop(ts){
+    if (!running) return;
+    if (!prevReal) prevReal = ts;
+    const dt = Math.min(60, ts - prevReal); prevReal = ts;
+    advance(st.t + dt * SPEED);
+    paint();
+    raf = requestAnimationFrame(loop);
+  }
+  const btnRun = document.getElementById('d1-run');
+  btnRun.onclick = () => {
+    running = !running;
+    btnRun.textContent = running ? '⏸ 暂停' : '▶ 开始';
+    if (running){ prevReal = 0; raf = requestAnimationFrame(loop); }
+    else cancelAnimationFrame(raf);
+  };
+  document.getElementById('d1-step').onclick = () => {
+    if (running) btnRun.onclick();
+    const pk = newPkt(); st.pend.push(pk); st.nextArr = Math.max(st.nextArr, st.t + P().iv);
+    const target = st.t;
+    /* 推进到该包放行 */
+    for (let i = 0; i < 400 && (st.cur || st.pend.length); i++) advance(st.t + 0.5);
+    paint();
+  };
+  document.getElementById('d1-reset').onclick = () => {
+    if (running) btnRun.onclick();
+    reset();
+  };
+  [sR, sB, sI].forEach(s => s.oninput = () => { syncLab(); reset(); });
+  REDRAW.push(() => { c = fitCanvas(cv, H); paint(); });
+  syncLab(); reset();
+})();
+
+/* ============ 2. 速率与桶深各管什么 ============ */
+(function(){
+  const cv = document.getElementById('d2-cv'), H = 250;
+  const sR = document.getElementById('d2-r'), sB = document.getElementById('d2-b'),
+        sI = document.getElementById('d2-i');
+  const ro = {
+    slope: document.getElementById('d2-ro-slope'), raw: document.getElementById('d2-ro-raw'),
+    err: document.getElementById('d2-ro-err'), pred: document.getElementById('d2-ro-pred')
+  };
+  let c = fitCanvas(cv, H), st, running = false, raf = 0, prevReal = 0;
+  const T = 160, SPEED = 0.09;      // 窗口 160 ms
+
+  function P(){ return {R:+sR.value, B:+sB.value, ip:+sI.value}; }
+  function syncLab(){
+    const p = P();
+    document.getElementById('d2-rv').textContent = fmt(p.R) + ' KB/s';
+    document.getElementById('d2-bv').textContent = p.B + ' B';
+    document.getElementById('d2-iv').textContent =
+      p.ip === 100 ? '满桶' : (p.ip === 0 ? '0 B' : fmt(p.B * p.ip / 100, 0) + ' B');
+  }
+  function reset(){
+    const p = P();
+    st = {bk:new Bucket(p.R, p.B, p.B * p.ip / 100), t:0, pts:[{t:0, c:0}],
+          rnd:lcg(777), pend:0};
+    paint();
+  }
+  /* 饱和需求: 请求永远排满, 桶是唯一瓶颈 */
+  function advance(t1){
+    for (let g = 0; g < 3000 && st.t < t1; g++){
+      const cost = Math.round(40 + st.rnd() * 160);
+      const r = st.bk.reserve(st.t, cost);
+      if (r.start > t1){ st.t = t1; break; }
+      st.t = r.start;
+      st.bk.account(st.t, cost);
+      st.pts.push({t:st.t, c:st.bk.totalCost});
+    }
+    if (st.t < t1) st.t = t1;
+  }
+  function paint(){
+    const p = P(), W = CW(cv);
+    c.clearRect(0, 0, W, H);
+    const gx = 56, gy = 16, gw = W - gx - 14, gh = H - gy - 34;
+    const yMax = p.R * T + p.B * 1.12;
+    const X = t => gx + t / T * gw, Y = v => gy + gh - gh * Math.min(1.02, v / yMax);
+    c.strokeStyle = css('--line'); c.strokeRect(gx, gy, gw, gh);
+    for (let i = 1; i < 4; i++) hline(c, gx, gx + gw, gy + gh * i / 4, css('--line'), [2, 4]);
+    label(c, '累计放行量 (B)', gx + 4, gy + 10, css('--muted'), 'left', 11);
+    label(c, '0', gx - 6, gy + gh, css('--muted'), 'right', 10);
+    label(c, fmt(yMax, 0), gx - 6, gy + 4, css('--muted'), 'right', 10);
+    label(c, '0', gx, gy + gh + 14, css('--muted'), 'center', 10);
+    label(c, T + ' ms', gx + gw, gy + gh + 14, css('--muted'), 'right', 10);
+    /* 基准 R·t 与上界 R·t+B */
+    c.strokeStyle = css('--muted'); c.setLineDash([4, 4]); c.beginPath();
+    c.moveTo(X(0), Y(0)); c.lineTo(X(T), Y(p.R * T)); c.stroke(); c.setLineDash([]);
+    c.strokeStyle = css('--tok'); c.lineWidth = 1.6; c.beginPath();
+    c.moveTo(X(0), Y(p.B)); c.lineTo(X(T), Y(p.R * T + p.B)); c.stroke(); c.lineWidth = 1;
+    label(c, 'R·t + B', X(T) - 4, Y(p.R * T + p.B) - 10, css('--tok'), 'right', 11);
+    label(c, 'R·t', X(T) - 4, Y(p.R * T) + 12, css('--muted'), 'right', 11);
+    /* B 的竖向标尺 */
+    c.strokeStyle = css('--tok'); c.setLineDash([2, 2]); c.beginPath();
+    c.moveTo(X(0) + 1, Y(0)); c.lineTo(X(0) + 1, Y(p.B)); c.stroke(); c.setLineDash([]);
+    label(c, 'B', X(0) + 6, (Y(0) + Y(p.B)) / 2, css('--tok'), 'left', 11);
+    /* 实际曲线 */
+    c.strokeStyle = css('--pkt'); c.lineWidth = 2; c.beginPath();
+    c.moveTo(X(0), Y(0));
+    st.pts.forEach(q => c.lineTo(X(Math.min(q.t, T)), Y(q.c)));
+    c.lineTo(X(Math.min(st.t, T)), Y(st.bk.totalCost));
+    c.stroke(); c.lineWidth = 1;
+    /* 游标 */
+    const cx = X(Math.min(st.t, T));
+    hline(c, cx, cx, gy, css('--line'));
+    c.strokeStyle = css('--line'); c.beginPath(); c.moveTo(cx, gy); c.lineTo(cx, gy + gh); c.stroke();
+    /* 读数 */
+    const n = st.pts.length;
+    if (n > 3){
+      const a = st.pts[Math.max(1, n - 6)], b = st.pts[n - 1];
+      const sl = (b.t > a.t) ? (b.c - a.c) / (b.t - a.t) : 0;
+      setRo(ro.slope, fmt(sl, 2) + ' B/ms');
+    } else setRo(ro.slope, '—');
+    if (st.t > 1){
+      const raw = st.bk.totalCost / st.t;
+      const err = (raw - p.R) / p.R * 100;
+      setRo(ro.raw, fmt(raw, 2) + ' B/ms');
+      setRo(ro.err, (err >= 0 ? '+' : '') + fmt(err, 1) + '%');
+      setRo(ro.pred, '+' + fmt(p.B / (p.R * st.t) * 100, 1) + '%');
+    } else { setRo(ro.raw, '—'); setRo(ro.err, '—'); setRo(ro.pred, '—'); }
+  }
+  const btn = document.getElementById('d2-run');
+  function stop(){ running = false; btn.textContent = '▶ 播放'; cancelAnimationFrame(raf); }
+  function loop(ts){
+    if (!running) return;
+    if (!prevReal) prevReal = ts;
+    const dt = Math.min(60, ts - prevReal); prevReal = ts;
+    advance(Math.min(T, st.t + dt * SPEED));
+    paint();
+    if (st.t >= T){ stop(); return; }
+    raf = requestAnimationFrame(loop);
+  }
+  btn.onclick = () => {
+    if (running){ stop(); return; }
+    if (st.t >= T) reset();
+    running = true; btn.textContent = '⏸ 暂停'; prevReal = 0;
+    raf = requestAnimationFrame(loop);
+  };
+  document.getElementById('d2-reset').onclick = () => { stop(); reset(); };
+  [sR, sB, sI].forEach(s => s.oninput = () => { syncLab(); stop(); reset(); });
+  REDRAW.push(() => { c = fitCanvas(cv, H); paint(); });
+  syncLab(); reset();
+})();
+
+/* ============ 3. 令牌计数 vs 虚拟时间 ============ */
+(function(){
+  const cv = document.getElementById('d3-cv'), H = 210;
+  const sR = document.getElementById('d3-r'), sB = document.getElementById('d3-b');
+  const log = document.getElementById('d3-log');
+  const ro = {
+    tok: document.getElementById('d3-ro-tok'), loop: document.getElementById('d3-ro-loop'),
+    tat: document.getElementById('d3-ro-tat'), der: document.getElementById('d3-ro-der')
+  };
+  let c = fitCanvas(cv, H), st, auto = false, timer = 0;
+  const TICK = 0.25;              // 左侧实现的轮询步长 ms
+
+  function P(){ return {R:+sR.value, B:+sB.value}; }
+  function syncLab(){
+    const p = P();
+    document.getElementById('d3-rv').textContent = fmt(p.R) + ' KB/s';
+    document.getElementById('d3-bv').textContent = p.B + ' B';
+  }
+  function reset(){
+    const p = P();
+    st = {t:0, tok:p.B, loops:0, bk:new Bucket(p.R, p.B, p.B), id:0, rnd:lcg(31337),
+          lastAct:'', lastLoop:0};
+    log.innerHTML = '';
+    logLine(log, '两侧同初态: tokens = TAT 折算令牌 = ' + p.B + ' B', 'hl');
+    paint();
+  }
+  function step(){
+    const p = P();
+    const cost = Math.round(60 + st.rnd() * 240);
+    st.id++;
+    /* ---- 左: 维护 tokens 变量 + 循环等待 ---- */
+    let loops = 0, tL = st.t;
+    while (st.tok < cost && loops < 100000){
+      tL += TICK; loops++;
+      st.tok = Math.min(p.B, st.tok + p.R * TICK);   // 反复累加 + 上限裁剪
+    }
+    st.tok -= cost;
+    st.loops += loops; st.lastLoop = loops;
+    /* ---- 右: GCRA 一次闭式求解 ---- */
+    const r = st.bk.reserve(st.t, cost);
+    st.t = r.start;                                  // 两侧放行时刻一致
+    st.bk.account(st.t, cost);
+    /* 左侧令牌按真实放行时刻对齐（排除轮询步长引入的量化） */
+    st.tok = Math.min(p.B, st.bk.tokens(st.t));
+    logLine(log, '#' + st.id + ' cost=' + cost +
+            '   左: 循环 ' + loops + ' 次' +
+            '   右: #delay ' + (r.stalled ? '1' : '0') + ' 次, start=' + fmt(r.start, 2) + ' ms',
+            loops > 0 ? 'wv' : '');
+    paint();
+  }
+  function paint(){
+    const p = P(), W = CW(cv), half = W / 2;
+    c.clearRect(0, 0, W, H);
+    c.strokeStyle = css('--line'); c.setLineDash([3, 3]);
+    c.beginPath(); c.moveTo(half, 8); c.lineTo(half, H - 8); c.stroke(); c.setLineDash([]);
+    const tokR = st.bk.tokens(st.t);
+    /* ---- 左侧: 令牌条 ---- */
+    label(c, '实现 A：tokens 变量 + while 轮询', 14, 18, css('--fg'), 'left', 12);
+    const bw = half - 48, bh = 26, bx = 14, by = 40;
+    c.strokeStyle = css('--line'); rrect(c, bx, by, bw, bh, 4); c.stroke();
+    c.fillStyle = css('--tok'); c.globalAlpha = .85;
+    c.fillRect(bx, by, bw * Math.max(0, Math.min(1, st.tok / p.B)), bh);
+    c.globalAlpha = 1;
+    label(c, 'tokens = ' + fmt(st.tok, 2) + ' B', bx + 6, by + bh + 14, css('--muted'), 'left', 11);
+    label(c, '累计循环 ' + st.loops + ' 次（本包 ' + st.lastLoop + '）',
+          bx + 6, by + bh + 30, css('--warn-line'), 'left', 11);
+    label(c, '每轮: tok += R·Δt, 再裁到 B', bx + 6, by + bh + 48, css('--muted'), 'left', 10.5);
+    label(c, '→ 反复累加, 浮点会漂移', bx + 6, by + bh + 62, css('--muted'), 'left', 10.5);
+    /* ---- 右侧: 时间轴 TAT ---- */
+    const rx = half + 16, rw = W - rx - 14;
+    label(c, '实现 B：GCRA 虚拟时间（本项目）', rx, 18, css('--fg'), 'left', 12);
+    const axY = by + 14, span = Math.max(p.B / p.R * 1.6, st.bk.tat - st.t + 4);
+    const X = t => rx + (t - st.t) / span * rw;
+    c.strokeStyle = css('--line'); c.beginPath();
+    c.moveTo(rx, axY); c.lineTo(rx + rw, axY); c.stroke();
+    /* now */
+    c.fillStyle = css('--pkt'); c.fillRect(X(st.t) - 1, axY - 8, 2, 16);
+    label(c, 'now', X(st.t), axY - 14, css('--pkt'), 'left', 10.5);
+    /* TAT */
+    const xt = Math.min(rx + rw, X(st.bk.tat));
+    c.fillStyle = css('--warn-line'); c.fillRect(xt - 1, axY - 8, 2, 16);
+    label(c, 'TAT', xt, axY + 18, css('--warn-line'), 'center', 10.5);
+    c.fillStyle = css('--wait'); c.globalAlpha = .22;
+    c.fillRect(X(st.t), axY - 6, Math.max(0, xt - X(st.t)), 12); c.globalAlpha = 1;
+    label(c, 'TAT − now = ' + fmt(st.bk.tat - st.t, 2) + ' ms', rx, axY + 42, css('--muted'), 'left', 11);
+    label(c, 'tokens = B − (TAT−now)·R = ' + fmt(tokR, 2) + ' B', rx, axY + 58, css('--muted'), 'left', 11);
+    label(c, '→ 一次闭式求解, 无循环', rx, axY + 76, css('--muted'), 'left', 10.5);
+    /* 读数 */
+    setRo(ro.tok, fmt(st.tok, 2) + ' B');
+    setRo(ro.loop, st.loops + '');
+    setRo(ro.tat, fmt(st.bk.tat - st.t, 2) + ' ms');
+    const d = Math.abs(st.tok - tokR);
+    setRo(ro.der, fmt(d, 3), d < 1e-6 ? 'ok' : 'bad');
+  }
+  document.getElementById('d3-step').onclick = step;
+  const btnAuto = document.getElementById('d3-auto');
+  btnAuto.onclick = () => {
+    auto = !auto;
+    btnAuto.textContent = auto ? '⏸ 暂停' : '▶ 连续';
+    if (auto) timer = setInterval(step, 420); else clearInterval(timer);
+  };
+  document.getElementById('d3-reset').onclick = () => {
+    if (auto) btnAuto.onclick();
+    reset();
+  };
+  [sR, sB].forEach(s => s.oninput = () => { syncLab(); if (auto) btnAuto.onclick(); reset(); });
+  REDRAW.push(() => { c = fitCanvas(cv, H); paint(); });
+  syncLab(); reset();
+})();
+
+/* ============ 4. TAT 推进：四步拆解 ============ */
+(function(){
+  const cv = document.getElementById('d4-cv-main'), H = 230;
+  const sC = document.getElementById('d4-c'), sG = document.getElementById('d4-g');
+  const steps = [...document.getElementById('d4-steps').querySelectorAll('.s')];
+  const log = document.getElementById('d4-log');
+  const ro = {
+    t: document.getElementById('d4-ro-t'), e: document.getElementById('d4-ro-e'),
+    s: document.getElementById('d4-ro-s'), tat: document.getElementById('d4-ro-tat'),
+    tok: document.getElementById('d4-ro-tok'), st: document.getElementById('d4-ro-st')
+  };
+  const R = 8, B = 1000;           // 固定 R/B, 把注意力放在四步本身
+  let c = fitCanvas(cv, H), st;
+
+  function P(){ return {cost:+sC.value, gap:+sG.value}; }
+  function syncLab(){
+    const p = P();
+    document.getElementById('d4-cv').textContent = p.cost + ' B';
+    document.getElementById('d4-gv').textContent = p.gap + ' ms';
+  }
+  function reset(){
+    st = {bk:new Bucket(R, B, B), t:0, phase:-1, id:0, cur:null, prevTat:0};
+    st.prevTat = st.bk.tat;
+    log.innerHTML = '';
+    logRow('初态: R=' + R + ' B/ms, B=' + B + ' B, 满桶 → tat = ' + fmt(st.bk.tat, 2) + ' ms', 'hl');
+    render();
+  }
+  function logRow(s, cls){ logLine(log, s, cls); }
+  /* 开始一个新包: 先按「距上包」推进时钟 */
+  function beginPkt(){
+    const p = P();
+    st.t = (st.id === 0) ? 0 : st.t + p.gap;
+    st.id++;
+    st.prevTat = st.bk.tat;
+    st.cur = {cost:p.cost, t:st.t, earliest:null, start:null, tat:null,
+              tok:st.bk.tokens(st.t), stalled:false, tatHit:false};
+    st.phase = 0;
+    logRow('—— 包 #' + st.id + ' cost=' + p.cost + ' B, 距上包 ' +
+           (st.id === 1 ? 0 : p.gap) + ' ms ——', 'hl');
+  }
+  function next(){
+    const p = P();
+    if (st.phase < 0 || st.phase >= 4){ beginPkt(); render(); return; }
+    const cu = st.cur;
+    if (st.phase === 0){
+      logRow('① t_ns = ' + fmt(cu.t, 2) + ' ms   （放行前令牌 ' + fmt(cu.tok, 1) + ' B）');
+      st.phase = 1;
+    } else if (st.phase === 1){
+      cu.earliest = st.prevTat - (B - cu.cost) / R;
+      logRow('② earliest = tat(' + fmt(st.prevTat, 2) + ') − (B−cost)/R(' +
+             fmt((B - cu.cost) / R, 2) + ') = ' + fmt(cu.earliest, 2) + ' ms');
+      st.phase = 2;
+    } else if (st.phase === 2){
+      cu.start = Math.max(cu.earliest, cu.t);
+      cu.stalled = cu.start - cu.t > 1e-9;
+      logRow('③ start = max(' + fmt(cu.earliest, 2) + ', ' + fmt(cu.t, 2) + ') = ' +
+             fmt(cu.start, 2) + ' ms' + (cu.stalled ? '  → stall ' + fmt(cu.start - cu.t, 2) + ' ms' : '  → 立即放行'),
+             cu.stalled ? 'wv' : '');
+      st.phase = 3;
+    } else {
+      cu.tatHit = cu.start > st.prevTat;
+      cu.tat = (cu.tatHit ? cu.start : st.prevTat) + cu.cost / R;
+      /* 真正落到模型上 */
+      st.bk.tat = st.prevTat;
+      const r = st.bk.reserve(cu.t, cu.cost);
+      st.bk.account(r.start, cu.cost);
+      st.t = r.start;
+      logRow('④ tat = max(' + fmt(cu.start, 2) + ', ' + fmt(st.prevTat, 2) + ')' +
+             (cu.tatHit ? ' = start（内层 max 生效：空闲期 TAT 落后于现在）' : ' = 旧 tat') +
+             ' + cost/R(' + fmt(cu.cost / R, 2) + ') = ' + fmt(cu.tat, 2) + ' ms',
+             cu.tatHit ? 'bv' : '');
+      st.phase = 4;
+    }
+    render();
+  }
+  function render(){
+    steps.forEach((s, i) => s.classList.toggle('on', i === st.phase));
+    paint();
+    const cu = st.cur;
+    setRo(ro.t, cu ? fmt(cu.t, 2) + ' ms' : '—');
+    setRo(ro.e, cu && cu.earliest !== null ? fmt(cu.earliest, 2) + ' ms' : '—');
+    setRo(ro.s, cu && cu.start !== null ? fmt(cu.start, 2) + ' ms' : '—');
+    setRo(ro.tat, fmt(cu && cu.tat !== null ? cu.tat : st.prevTat, 2) + ' ms');
+    setRo(ro.tok, cu ? fmt(cu.tok, 1) + ' B' : '—');
+    if (cu && cu.start !== null)
+      setRo(ro.st, fmt(cu.start - cu.t, 2) + ' ms', cu.stalled ? 'bad' : 'ok');
+    else setRo(ro.st, '—');
+  }
+  function paint(){
+    const W = CW(cv), cu = st.cur;
+    c.clearRect(0, 0, W, H);
+    const ax = 20, aw = W - 40, ay = 96;
+    /* 时间窗 */
+    const cand = [st.t, st.prevTat, cu ? cu.t : 0, cu && cu.earliest !== null ? cu.earliest : 0,
+                  cu && cu.start !== null ? cu.start : 0, cu && cu.tat !== null ? cu.tat : 0];
+    let lo = Math.min(...cand), hi = Math.max(...cand);
+    const pad = Math.max(8, (hi - lo) * 0.22);
+    lo -= pad; hi += pad;
+    const X = t => ax + (t - lo) / (hi - lo) * aw;
+    c.strokeStyle = css('--line'); c.lineWidth = 1.4;
+    c.beginPath(); c.moveTo(ax, ay); c.lineTo(ax + aw, ay); c.stroke(); c.lineWidth = 1;
+    label(c, '虚拟时间轴（ms）', ax, 22, css('--fg'), 'left', 12);
+    label(c, 'R = ' + R + ' B/ms   B = ' + B + ' B', ax + aw, 22, css('--muted'), 'right', 11);
+    function mark(t, txt, color, up, strong){
+      if (t === null || t === undefined) return;
+      const x = Math.max(ax, Math.min(ax + aw, X(t)));
+      c.fillStyle = color;
+      c.fillRect(x - (strong ? 1.5 : 1), ay - 11, strong ? 3 : 2, 22);
+      const y = up ? ay - 20 : ay + 22;
+      label(c, txt, x, y, color, 'center', 11);
+      label(c, fmt(t, 2), x, up ? ay - 34 : ay + 36, color, 'center', 10);
+    }
+    /* 旧 tat */
+    mark(st.prevTat, 'tat(旧)', css('--muted'), false);
+    if (cu){
+      mark(cu.t, 't_ns', css('--pkt'), true, true);
+      if (st.phase >= 1) mark(cu.earliest, 'earliest', css('--warn-line'), false);
+      if (st.phase >= 2){
+        mark(cu.start, 'start', css('--tok'), true, true);
+        if (cu.stalled){
+          c.fillStyle = css('--wait'); c.globalAlpha = .3;
+          c.fillRect(X(cu.t), ay - 7, Math.max(1, X(cu.start) - X(cu.t)), 14);
+          c.globalAlpha = 1;
+          label(c, 'stall', (X(cu.t) + X(cu.start)) / 2, ay, '#7a5c00', 'center', 10);
+        }
+      }
+      if (st.phase >= 3 && cu.tat !== null){
+        mark(cu.tat, 'tat(新)', css('--bad-line'), true, true);
+        const x0 = X(cu.tatHit ? cu.start : st.prevTat);
+        c.fillStyle = css('--bad-line'); c.globalAlpha = .18;
+        c.fillRect(x0, ay - 7, Math.max(1, X(cu.tat) - x0), 14); c.globalAlpha = 1;
+        label(c, '+cost/R', (x0 + X(cu.tat)) / 2, ay + 56, css('--bad-line'), 'center', 10);
+      }
+    }
+    /* 令牌刻度条 */
+    const by = 170, bw2 = W - 40, bh = 22;
+    c.strokeStyle = css('--line'); rrect(c, 20, by, bw2, bh, 4); c.stroke();
+    const tokNow = Math.max(0, Math.min(B, st.bk.tokens(st.t)));
+    c.fillStyle = css('--tok'); c.globalAlpha = .8;
+    c.fillRect(20, by, bw2 * tokNow / B, bh); c.globalAlpha = 1;
+    label(c, '当前令牌 ' + fmt(tokNow, 0) + ' / ' + B + ' B   （= B − (tat − now)·R）',
+          24, by + bh + 14, css('--muted'), 'left', 11);
+    label(c, 'now = ' + fmt(st.t, 2) + ' ms', W - 20, by + bh + 14, css('--muted'), 'right', 11);
+  }
+  document.getElementById('d4-next').onclick = next;
+  document.getElementById('d4-pkt').onclick = () => {
+    let guard = 0;
+    while (st.phase >= 0 && st.phase < 4 && guard++ < 8) next();
+    beginPkt(); render();
+  };
+  document.getElementById('d4-reset').onclick = reset;
+  [sC, sG].forEach(s => s.oninput = syncLab);
+  REDRAW.push(() => { c = fitCanvas(cv, H); paint(); });
+  syncLab(); reset();
+})();
+
+/* ============ 5. 截断计费为什么错 ============ */
+(function(){
+  const cv = document.getElementById('d5-cv'), H = 240;
+  const sB = document.getElementById('d5-b'), sP = document.getElementById('d5-p');
+  const ro = {
+    tr: document.getElementById('d5-ro-tr'), ta: document.getElementById('d5-ro-ta'),
+    fr: document.getElementById('d5-ro-fr'), fa: document.getElementById('d5-ro-fa'),
+    un: document.getElementById('d5-ro-under')
+  };
+  const R = 8, T = 220, SPEED = 0.12;
+  let c = fitCanvas(cv, H), st, running = false, raf = 0, prevReal = 0;
+
+  function P(){ return {B:+sB.value, big:+sP.value}; }
+  function syncLab(){
+    const p = P();
+    document.getElementById('d5-bv').textContent = p.B + ' B';
+    document.getElementById('d5-pv').textContent = p.big + '%';
+  }
+  /* 两个桶输入完全相同, 只有计费方式不同 */
+  function reset(){
+    const p = P();
+    st = {t:0, rnd:lcg(90210),
+          A:{bk:new Bucket(R, p.B, p.B), t:0, pts:[{t:0, c:0}], real:0},   // 截断计费
+          F:{bk:new Bucket(R, p.B, p.B), t:0, pts:[{t:0, c:0}], real:0},   // 实际计费
+          under:0, seq:[], idx:{A:0, F:0}};
+    paint();
+  }
+  function costAt(i){
+    const p = P();
+    while (st.seq.length <= i){
+      const r1 = st.rnd(), r2 = st.rnd();
+      st.seq.push(r1 * 100 < p.big
+                  ? Math.round(p.B * (1.4 + r2 * 1.4))      // 大包: 1.4~2.8 倍 B
+                  : Math.round(p.B * (0.12 + r2 * 0.28)));  // 普通包
+    }
+    return st.seq[i];
+  }
+  function run(side, trunc, t1){
+    const p = P(), s = st[side], key = side;
+    for (let g = 0; g < 3000 && s.t < t1; g++){
+      const real = costAt(st.idx[key]);
+      const charge = trunc ? Math.min(real, p.B) : real;
+      const r = s.bk.reserve(s.t, charge);
+      if (r.start > t1){ s.t = t1; break; }
+      st.idx[key]++;
+      s.t = r.start;
+      s.bk.account(s.t, charge);
+      s.real += real;                                 // 真正搬出去的字节
+      if (trunc) st.under += real - charge;
+      s.pts.push({t:s.t, c:s.real});
+    }
+    if (s.t < t1) s.t = t1;
+  }
+  function advance(t1){ run('A', true, t1); run('F', false, t1); st.t = t1; }
+  function paint(){
+    const p = P(), W = CW(cv);
+    c.clearRect(0, 0, W, H);
+    const gx = 58, gy = 16, gw = W - gx - 14, gh = H - gy - 32;
+    const yMax = Math.max(st.A.real, st.F.real, R * T) * 1.08 + 1;
+    const X = t => gx + t / T * gw, Y = v => gy + gh - gh * Math.min(1.02, v / yMax);
+    c.strokeStyle = css('--line'); c.strokeRect(gx, gy, gw, gh);
+    label(c, '累计搬运字节', gx + 4, gy + 10, css('--muted'), 'left', 11);
+    label(c, fmt(yMax, 0), gx - 6, gy + 4, css('--muted'), 'right', 10);
+    label(c, '0', gx - 6, gy + gh, css('--muted'), 'right', 10);
+    label(c, T + ' ms', gx + gw, gy + gh + 14, css('--muted'), 'right', 10);
+    /* 基准 */
+    c.strokeStyle = css('--muted'); c.setLineDash([4, 4]); c.beginPath();
+    c.moveTo(X(0), Y(0)); c.lineTo(X(T), Y(R * T)); c.stroke(); c.setLineDash([]);
+    label(c, 'R·t', X(T) - 4, Y(R * T) + 12, css('--muted'), 'right', 11);
+    function curve(pts, color){
+      c.strokeStyle = color; c.lineWidth = 2; c.beginPath(); c.moveTo(X(0), Y(0));
+      pts.forEach(q => c.lineTo(X(Math.min(q.t, T)), Y(q.c)));
+      c.stroke(); c.lineWidth = 1;
+    }
+    curve(st.F.pts, css('--pkt'));
+    curve(st.A.pts, css('--bad-line'));
+    /* 偏差阴影 */
+    if (st.A.real > st.F.real){
+      const x = X(Math.min(st.t, T));
+      c.strokeStyle = css('--bad-line'); c.setLineDash([2, 2]); c.beginPath();
+      c.moveTo(x, Y(st.F.real)); c.lineTo(x, Y(st.A.real)); c.stroke(); c.setLineDash([]);
+      label(c, '+' + fmt(st.A.real - st.F.real, 0) + ' B 超发',
+            x - 6, (Y(st.F.real) + Y(st.A.real)) / 2, css('--bad-line'), 'right', 10.5);
+    }
+    if (st.t > 1){
+      const ra = st.A.real / st.t, rf = st.F.real / st.t;
+      setRo(ro.tr, fmt(ra, 2) + ' B/ms', 'bad');
+      setRo(ro.ta, '+' + fmt((ra - R) / R * 100, 1) + '%', 'bad');
+      setRo(ro.fr, fmt(rf, 2) + ' B/ms', 'ok');
+      setRo(ro.fa, (rf - R >= 0 ? '+' : '') + fmt((rf - R) / R * 100, 1) + '%', 'ok');
+      setRo(ro.un, fmt(st.under, 0) + ' B');
+    } else { ['tr','ta','fr','fa'].forEach(k => setRo(ro[k], '—')); setRo(ro.un, '0'); }
+  }
+  const btn = document.getElementById('d5-run');
+  function stop(){ running = false; btn.textContent = '▶ 播放'; cancelAnimationFrame(raf); }
+  function loop(ts){
+    if (!running) return;
+    if (!prevReal) prevReal = ts;
+    const dt = Math.min(60, ts - prevReal); prevReal = ts;
+    advance(Math.min(T, st.t + dt * SPEED)); paint();
+    if (st.t >= T){ stop(); return; }
+    raf = requestAnimationFrame(loop);
+  }
+  btn.onclick = () => {
+    if (running){ stop(); return; }
+    if (st.t >= T) reset();
+    running = true; btn.textContent = '⏸ 暂停'; prevReal = 0;
+    raf = requestAnimationFrame(loop);
+  };
+  document.getElementById('d5-reset').onclick = () => { stop(); reset(); };
+  [sB, sP].forEach(s => s.oninput = () => { syncLab(); stop(); reset(); });
+  REDRAW.push(() => { c = fitCanvas(cv, H); paint(); });
+  syncLab(); reset();
+})();
+
+/* ============ 6. 符合性：覆盖任意窗口 ============ */
+(function(){
+  const cv = document.getElementById('d6-cv'), H = 250;
+  const sB = document.getElementById('d6-b');
+  const segBtns = [...document.getElementById('d6-mode').querySelectorAll('button')];
+  const ro = {
+    f: document.getElementById('d6-ro-f'), min: document.getElementById('d6-ro-min'),
+    ex: document.getElementById('d6-ro-ex'), nv: document.getElementById('d6-ro-naive'),
+    ok: document.getElementById('d6-ro-ok')
+  };
+  const R = 8, T = 260, SPEED = 0.16;
+  let c = fitCanvas(cv, H), st, mode = 0, running = false, raf = 0, prevReal = 0;
+
+  function syncLab(){ document.getElementById('d6-bv').textContent = sB.value + ' B'; }
+  /* 场景: 突发 → 空闲 → 再突发；空闲期长度足以让 f 下探 */
+  function idleNow(t){
+    if (mode === 1) return false;                 // 持续满载
+    return (t > 70 && t < 150);                   // 含中途空闲
+  }
+  function reset(){
+    const B = +sB.value;
+    st = {bk:new Bucket(R, B, B), t:0, rnd:lcg(5150),
+          pts:[{t:0, f:0, fmin:0}], naive:0, naiveAt:0, exAt:0, exFrom:0};
+    paint();
+  }
+  function advance(t1){
+    const B = +sB.value;
+    for (let g = 0; g < 4000 && st.t < t1; g++){
+      if (idleNow(st.t)){                          // 自愿 idle, 不请求
+        st.t = Math.min(t1, 150);
+        st.pts.push({t:st.t, f:st.bk.totalCost - (st.t - 0) * R, fmin:st.bk.fmin, idle:1});
+        if (st.t >= t1) break; else continue;
+      }
+      const cost = Math.round(B * (0.08 + st.rnd() * 0.22));
+      const r = st.bk.reserve(st.t, cost);
+      if (r.start > t1){ st.t = t1; break; }
+      st.t = r.start;
+      const before = st.bk.maxExcess;
+      const a = st.bk.account(st.t, cost);
+      if (st.bk.maxExcess > before){ st.exAt = st.t; st.exFrom = st.bk.fmin; }
+      /* 朴素算法: 窗口左端永远钉在首包起点 */
+      const nv = st.bk.totalCost - (st.t - st.bk.first) * R;
+      if (nv > st.naive){ st.naive = nv; st.naiveAt = st.t; }
+      st.pts.push({t:st.t, f:a.f, fmin:st.bk.fmin});
+    }
+    if (st.t < t1) st.t = t1;
+  }
+  function paint(){
+    const B = +sB.value, W = CW(cv);
+    c.clearRect(0, 0, W, H);
+    const gx = 62, gy = 18, gw = W - gx - 14, gh = H - gy - 34;
+    let hi = B * 1.3, lo = -B * 1.3;
+    st.pts.forEach(q => { if (q.f > hi) hi = q.f * 1.08; if (q.f < lo) lo = q.f * 1.08; });
+    const X = t => gx + t / T * gw, Y = v => gy + gh - gh * (v - lo) / (hi - lo);
+    c.strokeStyle = css('--line'); c.strokeRect(gx, gy, gw, gh);
+    hline(c, gx, gx + gw, Y(0), css('--line'), [2, 4]);
+    label(c, '0', gx - 6, Y(0), css('--muted'), 'right', 10);
+    label(c, 'f(t) = cost(t) − R·t   (B)', gx + 4, gy + 10, css('--muted'), 'left', 11);
+    label(c, T + ' ms', gx + gw, gy + gh + 14, css('--muted'), 'right', 10);
+    /* 空闲区 */
+    if (mode === 0 && st.t > 70){
+      c.fillStyle = '#d1d9e0'; c.globalAlpha = .35;
+      c.fillRect(X(70), gy, X(Math.min(st.t, 150)) - X(70), gh); c.globalAlpha = 1;
+      label(c, '自愿 idle', (X(70) + X(Math.min(st.t, 150))) / 2, gy + gh - 10,
+            css('--muted'), 'center', 11);
+    }
+    /* 最大超额区间 */
+    if (st.bk.maxExcess > 0 && st.exAt > 0){
+      const yTop = Y(st.exFrom + st.bk.maxExcess), yBot = Y(st.exFrom);
+      c.fillStyle = css('--warn-line'); c.globalAlpha = .22;
+      c.fillRect(X(0), yTop, X(Math.min(st.t, T)) - X(0), Math.max(1, yBot - yTop));
+      c.globalAlpha = 1;
+      c.strokeStyle = css('--warn-line'); c.setLineDash([3, 3]);
+      c.beginPath(); c.moveTo(X(st.exAt), yTop); c.lineTo(X(st.exAt), yBot); c.stroke();
+      c.setLineDash([]);
+      label(c, 'max_excess = ' + fmt(st.bk.maxExcess, 0) + ' B',
+            X(st.exAt) + 6, (yTop + yBot) / 2, '#7a5c00', 'left', 10.5);
+    }
+    /* B 上限参考 */
+    function ref(v, txt, color){
+      hline(c, gx, gx + gw, Y(v), color, [5, 3]);
+      label(c, txt, gx + gw - 4, Y(v) - 9, color, 'right', 10.5);
+    }
+    /* f_min 折线 */
+    c.strokeStyle = css('--ok-line'); c.lineWidth = 1.6; c.beginPath();
+    st.pts.forEach((q, i) => i ? c.lineTo(X(q.t), Y(q.fmin)) : c.moveTo(X(q.t), Y(q.fmin)));
+    c.stroke();
+    /* f 折线 */
+    c.strokeStyle = css('--pkt'); c.lineWidth = 2; c.beginPath();
+    st.pts.forEach((q, i) => i ? c.lineTo(X(q.t), Y(q.f)) : c.moveTo(X(q.t), Y(q.f)));
+    c.stroke(); c.lineWidth = 1;
+    label(c, 'f_min', gx + 4, Y(st.bk.fmin) - 9, css('--ok-line'), 'left', 10.5);
+    /* 读数 */
+    const last = st.pts[st.pts.length - 1];
+    setRo(ro.f, fmt(last.f, 0) + ' B');
+    setRo(ro.min, fmt(st.bk.fmin, 0) + ' B');
+    setRo(ro.ex, fmt(st.bk.maxExcess, 0) + ' / ' + B + ' B');
+    setRo(ro.nv, fmt(st.naive, 0) + ' B', st.naive < st.bk.maxExcess - 1 ? 'bad' : null);
+    setRo(ro.ok, st.bk.conformant() ? 'YES' : 'NO', st.bk.conformant() ? 'ok' : 'bad');
+  }
+  const btn = document.getElementById('d6-run');
+  function stop(){ running = false; btn.textContent = '▶ 播放'; cancelAnimationFrame(raf); }
+  function loop(ts){
+    if (!running) return;
+    if (!prevReal) prevReal = ts;
+    const dt = Math.min(60, ts - prevReal); prevReal = ts;
+    advance(Math.min(T, st.t + dt * SPEED)); paint();
+    if (st.t >= T){ stop(); return; }
+    raf = requestAnimationFrame(loop);
+  }
+  btn.onclick = () => {
+    if (running){ stop(); return; }
+    if (st.t >= T) reset();
+    running = true; btn.textContent = '⏸ 暂停'; prevReal = 0;
+    raf = requestAnimationFrame(loop);
+  };
+  document.getElementById('d6-reset').onclick = () => { stop(); reset(); };
+  segBtns.forEach(b => b.onclick = () => {
+    segBtns.forEach(x => x.classList.remove('on'));
+    b.classList.add('on'); mode = +b.dataset.m;
+    stop(); reset();
+  });
+  sB.oninput = () => { syncLab(); stop(); reset(); };
+  REDRAW.push(() => { c = fitCanvas(cv, H); paint(); });
+  syncLab(); reset();
+})();
+
+/* ============ 7. raw / steady / conformant ============ */
+(function(){
+  const cv = document.getElementById('d7-cv'), H = 240;
+  const sB = document.getElementById('d7-b'), sX = document.getElementById('d7-x');
+  const ro = {
+    raw: document.getElementById('d7-ro-raw'), rawe: document.getElementById('d7-ro-rawe'),
+    std: document.getElementById('d7-ro-std'), stde: document.getElementById('d7-ro-stde'),
+    ex: document.getElementById('d7-ro-ex'), ok: document.getElementById('d7-ro-ok')
+  };
+  const R = 8, T = 300, SPEED = 0.2;
+  let c = fitCanvas(cv, H), st, running = false, raf = 0, prevReal = 0;
+
+  function P(){ return {B:+sB.value, x:+sX.value}; }
+  function syncLab(){
+    const p = P();
+    document.getElementById('d7-bv').textContent = p.B + ' B';
+    document.getElementById('d7-xv').textContent = p.x + '%';
+  }
+  function reset(){
+    const p = P();
+    st = {bk:new Bucket(R, p.B, p.B), t:0, rnd:lcg(424242), pts:[], busy:0};
+    paint();
+  }
+  function advance(t1){
+    const p = P();
+    for (let g = 0; g < 4000 && st.t < t1; g++){
+      const cost = Math.round(p.B * (0.06 + st.rnd() * 0.16));
+      const r = st.bk.reserve(st.t, cost);
+      if (r.start > t1){ st.t = t1; break; }
+      st.t = r.start;
+      st.bk.account(st.t, cost);
+      /* 额外总线延时: 包搬完后占用总线, 下一包要排在它之后 */
+      const extra = (cost / R) * (p.x / 100) / (1 - p.x / 100 + 1e-9);
+      st.busy += extra;
+      st.t += extra;
+      const raw = st.bk.totalCost / st.t;
+      let std = NaN;
+      if (st.bk.steadyValid && st.t - st.bk.steadyT > 1)
+        std = (st.bk.totalCost - st.bk.steadyCost) / (st.t - st.bk.steadyT);
+      st.pts.push({t:st.t, raw:raw, std:std});
+    }
+    if (st.t < t1) st.t = t1;
+  }
+  function paint(){
+    const p = P(), W = CW(cv);
+    c.clearRect(0, 0, W, H);
+    const gx = 58, gy = 18, gw = W - gx - 14, gh = H - gy - 34;
+    const yMax = R * 2.2;
+    const X = t => gx + t / T * gw, Y = v => gy + gh - gh * Math.min(1.02, Math.max(0, v) / yMax);
+    c.strokeStyle = css('--line'); c.strokeRect(gx, gy, gw, gh);
+    label(c, '瞬时速率 (B/ms)', gx + 4, gy + 10, css('--muted'), 'left', 11);
+    label(c, fmt(yMax, 0), gx - 6, gy + 4, css('--muted'), 'right', 10);
+    label(c, '0', gx - 6, gy + gh, css('--muted'), 'right', 10);
+    label(c, T + ' ms', gx + gw, gy + gh + 14, css('--muted'), 'right', 10);
+    /* 配置 R */
+    hline(c, gx, gx + gw, Y(R), css('--muted'), [4, 4]);
+    label(c, '配置 R = ' + R, gx + gw - 4, Y(R) - 9, css('--muted'), 'right', 10.5);
+    /* 稳态起点 */
+    if (st.bk.steadyValid && st.bk.steadyT <= T){
+      const x = X(st.bk.steadyT);
+      c.strokeStyle = css('--ok-line'); c.setLineDash([3, 3]);
+      c.beginPath(); c.moveTo(x, gy); c.lineTo(x, gy + gh); c.stroke(); c.setLineDash([]);
+      label(c, '首次 stall → 稳态起点', x + 5, gy + 26, css('--ok-line'), 'left', 10.5);
+    }
+    function curve(key, color){
+      c.strokeStyle = color; c.lineWidth = 2; c.beginPath();
+      let on = false;
+      st.pts.forEach(q => {
+        if (isNaN(q[key])) { on = false; return; }
+        const x = X(Math.min(q.t, T)), y = Y(q[key]);
+        on ? c.lineTo(x, y) : (c.moveTo(x, y), on = true);
+      });
+      c.stroke(); c.lineWidth = 1;
+    }
+    curve('raw', css('--pkt'));
+    curve('std', css('--ok-line'));
+    /* 读数 */
+    if (st.t > 2){
+      const raw = st.bk.totalCost / st.t;
+      setRo(ro.raw, fmt(raw, 2) + ' B/ms');
+      setRo(ro.rawe, (raw - R >= 0 ? '+' : '') + fmt((raw - R) / R * 100, 1) + '%');
+      if (st.bk.steadyValid && st.t - st.bk.steadyT > 1){
+        const std = (st.bk.totalCost - st.bk.steadyCost) / (st.t - st.bk.steadyT);
+        setRo(ro.std, fmt(std, 2) + ' B/ms');
+        setRo(ro.stde, (std - R >= 0 ? '+' : '') + fmt((std - R) / R * 100, 1) + '%');
+      } else { setRo(ro.std, '等首次 stall'); setRo(ro.stde, '—'); }
+      setRo(ro.ex, fmt(st.bk.maxExcess, 0) + ' / ' + p.B + ' B');
+      setRo(ro.ok, st.bk.conformant() ? 'YES' : 'NO', st.bk.conformant() ? 'ok' : 'bad');
+    } else { ['raw','rawe','std','stde','ex','ok'].forEach(k => setRo(ro[k], '—')); }
+  }
+  const btn = document.getElementById('d7-run');
+  function stop(){ running = false; btn.textContent = '▶ 播放'; cancelAnimationFrame(raf); }
+  function loop(ts){
+    if (!running) return;
+    if (!prevReal) prevReal = ts;
+    const dt = Math.min(60, ts - prevReal); prevReal = ts;
+    advance(Math.min(T, st.t + dt * SPEED)); paint();
+    if (st.t >= T){ stop(); return; }
+    raf = requestAnimationFrame(loop);
+  }
+  btn.onclick = () => {
+    if (running){ stop(); return; }
+    if (st.t >= T) reset();
+    running = true; btn.textContent = '⏸ 暂停'; prevReal = 0;
+    raf = requestAnimationFrame(loop);
+  };
+  document.getElementById('d7-reset').onclick = () => { stop(); reset(); };
+  [sB, sX].forEach(s => s.oninput = () => { syncLab(); stop(); reset(); });
+  REDRAW.push(() => { c = fitCanvas(cv, H); paint(); });
+  syncLab(); reset();
+})();
+
+/* ============ 8. 多流共享一个桶 ============ */
+(function(){
+  const cv = document.getElementById('d8-cv'), H = 250;
+  const sL = document.getElementById('d8-l'), segBox = document.getElementById('d8-mode');
+  const ro = {
+    a: document.getElementById('d8-ro-a'), b: document.getElementById('d8-ro-b'),
+    sum: document.getElementById('d8-ro-sum'), lock: document.getElementById('d8-ro-lock'),
+    ok: document.getElementById('d8-ro-ok')
+  };
+  const R = 8, B = 800, T = 240, SPEED = 0.16, COST_A = 200;
+  let c = fitCanvas(cv, H), st, running = false, raf = 0, prevReal = 0, mode = 0;
+
+  function syncLab(){ document.getElementById('d8-lv').textContent = sL.value + ' B'; }
+  function reset(){
+    st = {
+      bk: new Bucket(R, B, B), t: 0, lockFree: 0,
+      f: [ {name:'A', cost:COST_A, color:css('--pkt'), next:0, bytes:0, bars:[]},
+           {name:'B', cost:+sL.value, color:'#8250df', next:0, bytes:0, bars:[]} ],
+      lockWait: 0
+    };
+    paint();
+  }
+  /* 一次请求 = 等锁 -> 预约(O(1)) -> 等令牌 -> 放行 */
+  function serveOne(fl){
+    const req = fl.next;
+    const acq = Math.max(req, st.lockFree);          // 等锁
+    const r   = st.bk.reserve(acq, fl.cost);         // 临界区内的纯运算
+    st.lockFree = (mode === 0) ? acq : r.start;      // 锁外等待 vs 锁内等待
+    st.bk.account(r.start, fl.cost);
+    fl.bytes += fl.cost;
+    fl.bars.push({req:req, acq:acq, start:r.start, cost:fl.cost});
+    fl.next = r.start;                               // 饱和需求: 立刻发下一包
+    st.lockWait += acq - req;
+    return r.start;
+  }
+  function advance(t1){
+    for (let g = 0; g < 4000; g++){
+      const fl = (st.f[0].next <= st.f[1].next) ? st.f[0] : st.f[1];
+      if (fl.next > t1) break;
+      /* 先试探: 这一包的放行时刻若越界, 本帧不处理 */
+      const acq = Math.max(fl.next, st.lockFree);
+      const peek = st.bk.tat - st.bk.tok2ms(st.bk.B - fl.cost);
+      if (Math.max(peek, acq) > t1) break;
+      serveOne(fl);
+    }
+    if (st.t < t1) st.t = t1;
+  }
+  function paint(){
+    const W = CW(cv);
+    c.clearRect(0, 0, W, H);
+    const gx = 30, gy = 22, gw = W - gx - 14;
+    const X = t => gx + t / T * gw;
+    const rowY = [gy + 10, gy + 86], rowH = 44;
+    /* 时间轴 */
+    hline(c, gx, gx + gw, gy + 168, css('--line'));
+    for (let t = 0; t <= T; t += 40){
+      c.strokeStyle = css('--line'); c.beginPath();
+      c.moveTo(X(t), gy + 168); c.lineTo(X(t), gy + 173); c.stroke();
+      label(c, t + '', X(t), gy + 186, css('--muted'), 'center', 10);
+    }
+    label(c, 'ms', gx + gw, gy + 186, css('--muted'), 'right', 10);
+    /* 当前时刻 */
+    c.strokeStyle = css('--muted'); c.setLineDash([2, 3]);
+    c.beginPath(); c.moveTo(X(Math.min(st.t, T)), gy); c.lineTo(X(Math.min(st.t, T)), gy + 168); c.stroke();
+    c.setLineDash([]);
+    st.f.forEach((fl, i) => {
+      const y = rowY[i];
+      label(c, '流 ' + fl.name, gx - 6, y + 26, fl.color, 'right', 11.5);
+      c.strokeStyle = css('--line'); c.strokeRect(gx, y, gw, rowH);
+      fl.bars.forEach(bar => {
+        const seg = (t0, t1, color) => {
+          if (t1 <= t0 || t0 > T) return;
+          const x0 = X(t0), x1 = X(Math.min(t1, T));
+          c.fillStyle = color; c.fillRect(x0, y + 4, Math.max(1.2, x1 - x0), rowH - 8);
+        };
+        seg(bar.req, bar.acq, css('--bad-line'));                 // 等锁
+        seg(bar.acq, bar.start, css('--wait'));                   // 等令牌
+        seg(bar.start, bar.start + bar.cost / R / 2, fl.color);   // 放行
+      });
+    });
+    label(c, '每条流都是饱和需求（上一包放行即发下一包）', gx + gw, gy - 6, css('--muted'), 'right', 10.5);
+    /* 读数 */
+    if (st.t > 4){
+      const ra = st.f[0].bytes / st.t, rb = st.f[1].bytes / st.t;
+      setRo(ro.a, fmt(ra, 2) + ' B/ms'); setRo(ro.b, fmt(rb, 2) + ' B/ms');
+      const sum = ra + rb;
+      setRo(ro.sum, fmt(sum, 2) + ' / ' + R, Math.abs(sum - R) / R < 0.08 ? 'ok' : null);
+      setRo(ro.lock, fmt(st.lockWait, 1) + ' ms', st.lockWait > 1 ? 'bad' : 'ok');
+      setRo(ro.ok, st.bk.conformant() ? 'YES' : 'NO', st.bk.conformant() ? 'ok' : 'bad');
+    } else { ['a','b','sum','lock','ok'].forEach(k => setRo(ro[k], '—')); }
+  }
+  const btn = document.getElementById('d8-run');
+  function stop(){ running = false; btn.textContent = '▶ 播放'; cancelAnimationFrame(raf); }
+  function loop(ts){
+    if (!running) return;
+    if (!prevReal) prevReal = ts;
+    const dt = Math.min(60, ts - prevReal); prevReal = ts;
+    advance(Math.min(T, st.t + dt * SPEED)); paint();
+    if (st.t >= T){ stop(); return; }
+    raf = requestAnimationFrame(loop);
+  }
+  btn.onclick = () => {
+    if (running){ stop(); return; }
+    if (st.t >= T) reset();
+    running = true; btn.textContent = '⏸ 暂停'; prevReal = 0;
+    raf = requestAnimationFrame(loop);
+  };
+  document.getElementById('d8-reset').onclick = () => { stop(); reset(); };
+  sL.oninput = () => { syncLab(); stop(); reset(); };
+  segBox.querySelectorAll('button').forEach(b => b.onclick = () => {
+    segBox.querySelectorAll('button').forEach(x => x.classList.remove('on'));
+    b.classList.add('on'); mode = +b.dataset.m; stop(); reset();
+  });
+  REDRAW.push(() => { c = fitCanvas(cv, H); paint(); });
+  syncLab(); reset();
+})();
+
+/* ============ 9. 包内空隙与瓶颈转移 ============ */
+(function(){
+  const cv = document.getElementById('d9-cv'), H = 254;
+  const sP = document.getElementById('d9-p'), sG = document.getElementById('d9-g');
+  const ro = {
+    beat: document.getElementById('d9-ro-beat'), byte: document.getElementById('d9-ro-byte'),
+    dc: document.getElementById('d9-ro-dc'), fifo: document.getElementById('d9-ro-fifo'),
+    bp: document.getElementById('d9-ro-bp')
+  };
+  const BPB = 4, DEPTH = 16, DRAIN_EVERY = 2, NWIN = 96, SPEED = 0.26;
+  let c = fitCanvas(cv, H), st, running = false, raf = 0, prevReal = 0;
+
+  function P(){ return {p:+sP.value, g:+sG.value}; }
+  function syncLab(){
+    const p = P();
+    document.getElementById('d9-pv').textContent = p.p + '%';
+    document.getElementById('d9-gv').textContent = '1~' + p.g;
+  }
+  function reset(){
+    st = {cyc:0, acc:0, fifo:0, peak:0, beats:0, bytes:0, bp:0, gap:0,
+          rnd:lcg(20240601), hist:[]};
+    paint();
+  }
+  /* 一拍 = 2 ns。valid&&ready 时搬 4 B；DUT 每 2 拍排空 1 项（线速的一半） */
+  function step(){
+    const p = P();
+    let kind;
+    if (st.gap > 0){ st.gap--; kind = 'gap'; }
+    else if (st.fifo >= DEPTH){ st.bp++; kind = 'bp'; }          // ready 拉低
+    else {
+      st.fifo++; st.beats++; st.bytes += BPB; kind = 'beat';
+      if (st.rnd() * 100 < p.p) st.gap = 1 + Math.floor(st.rnd() * p.g);
+    }
+    if (st.fifo > st.peak) st.peak = st.fifo;
+    st.cyc++;
+    if (st.cyc % DRAIN_EVERY === 0 && st.fifo > 0) st.fifo--;    // DUT 排空
+    st.hist.push({k:kind, f:st.fifo});
+    if (st.hist.length > NWIN) st.hist.shift();
+  }
+  function paint(){
+    const W = CW(cv);
+    c.clearRect(0, 0, W, H);
+    const gx = 58, gw = W - gx - 14;
+    const cw = gw / NWIN;
+    const n = st.hist.length;
+    /* ---- 总线节拍条 ---- */
+    const by = 24, bh = 34;
+    label(c, '总线', gx - 6, by + 22, css('--muted'), 'right', 11);
+    label(c, '每格 = 1 拍 (2 ns)，窗口显示最近 ' + NWIN + ' 拍', gx + gw, by - 8, css('--muted'), 'right', 10.5);
+    c.strokeStyle = css('--line'); c.strokeRect(gx, by, gw, bh);
+    const COL = {beat:css('--pkt'), gap:'#d1d9e0', bp:css('--bad-line')};
+    for (let i = 0; i < n; i++){
+      c.fillStyle = COL[st.hist[i].k];
+      c.fillRect(gx + i * cw, by + 3, Math.max(1, cw - 0.6), bh - 6);
+    }
+    /* ---- FIFO 水位 ---- */
+    const fy = 92, fh = 104;
+    label(c, 'FIFO', gx - 6, fy + fh / 2, css('--muted'), 'right', 11);
+    label(c, DEPTH + '', gx - 6, fy + 8, css('--muted'), 'right', 10);
+    label(c, '0', gx - 6, fy + fh, css('--muted'), 'right', 10);
+    c.strokeStyle = css('--line'); c.strokeRect(gx, fy, gw, fh);
+    hline(c, gx, gx + gw, fy + 2, css('--bad-line'), [4, 4]);
+    label(c, '满 → 背压', gx + gw - 4, fy + 15, css('--bad-line'), 'right', 10.5);
+    c.fillStyle = 'rgba(45,164,78,0.18)';
+    c.strokeStyle = css('--ok-line'); c.lineWidth = 1.6; c.beginPath();
+    c.moveTo(gx, fy + fh);
+    for (let i = 0; i < n; i++){
+      const x = gx + (i + 0.5) * cw, y = fy + fh - fh * st.hist[i].f / DEPTH;
+      c.lineTo(x, y);
+    }
+    if (n) c.lineTo(gx + (n - 0.5) * cw, fy + fh);
+    c.closePath(); c.fill(); c.stroke(); c.lineWidth = 1;
+    /* 背压拍在底部打红条 */
+    for (let i = 0; i < n; i++){
+      if (st.hist[i].k !== 'bp') continue;
+      c.fillStyle = css('--bad-line');
+      c.fillRect(gx + i * cw, fy + fh + 4, Math.max(1, cw - 0.6), 6);
+    }
+    label(c, '输入 ' + (st.cyc ? fmt(st.bytes / (st.cyc * 2) * 1e3, 0) : 0) +
+             ' MB/s   线速 2000 MB/s   DUT 排空 1000 MB/s',
+          gx, H - 6, css('--muted'), 'left', 10.5);
+    /* ---- 读数 ---- */
+    setRo(ro.beat, st.beats + '');
+    setRo(ro.byte, st.bytes + ' B');
+    setRo(ro.dc, st.cyc ? fmt(st.beats / st.cyc * 100, 1) + '%' : '—');
+    setRo(ro.fifo, st.peak + ' / ' + DEPTH, st.peak >= DEPTH ? 'bad' : 'ok');
+    setRo(ro.bp, st.bp + '', st.bp > 0 ? 'bad' : 'ok');
+  }
+  const btn = document.getElementById('d9-run');
+  function stop(){ running = false; btn.textContent = '▶ 播放'; cancelAnimationFrame(raf); }
+  function loop(ts){
+    if (!running) return;
+    if (!prevReal) prevReal = ts;
+    const dt = Math.min(60, ts - prevReal); prevReal = ts;
+    st.acc += dt * SPEED;
+    let k = 0;
+    while (st.acc >= 1 && k++ < 600){ st.acc -= 1; step(); }
+    paint();
+    raf = requestAnimationFrame(loop);
+  }
+  btn.onclick = () => {
+    if (running){ stop(); return; }
+    running = true; btn.textContent = '⏸ 暂停'; prevReal = 0;
+    raf = requestAnimationFrame(loop);
+  };
+  document.getElementById('d9-reset').onclick = () => { stop(); reset(); };
+  [sP, sG].forEach(s => s.oninput = () => { syncLab(); reset(); });
+  REDRAW.push(() => { c = fitCanvas(cv, H); paint(); });
+  syncLab(); reset();
+})();
+
+/* ============ 侧边导航 ============ */
+(function(){
+  const nav = document.getElementById('nav');
+  const btn = document.getElementById('nav-toggle');
+  const links = [...nav.querySelectorAll('a')];
+  btn.onclick = () => nav.classList.toggle('open');
+  links.forEach(a => a.onclick = () => nav.classList.remove('open'));
+  const targets = links.map(a => document.getElementById(a.getAttribute('href').slice(1)))
+                       .filter(Boolean);
+  let pending = false;
+  function upd(){
+    pending = false;
+    let cur = 0;
+    targets.forEach((t,i) => { if (t.getBoundingClientRect().top <= 90) cur = i; });
+    links.forEach((a,i) => a.classList.toggle('active', i === cur));
+    const a = links[cur];
+    if (a){
+      const r = a.getBoundingClientRect(), nr = nav.getBoundingClientRect();
+      if (r.top < nr.top + 10 || r.bottom > nr.bottom - 10)
+        a.scrollIntoView({block:'center'});
+    }
+  }
+  addEventListener('scroll', () => { if(!pending){ pending = true; requestAnimationFrame(upd); } });
+  addEventListener('resize', upd);
+  upd();
+})();
+</script>
+</body>
+</html>
