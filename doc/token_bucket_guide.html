@@ -125,6 +125,10 @@
   <a class="lv2" href="#1">1. 它解决什么问题</a>
   <a class="lv2" href="#2">2. 令牌桶原理</a>
   <a class="lv2" href="#3">3. 实现：虚拟时间 vs 令牌计数</a>
+  <a class="lv3" href="#3-1">3.1 恒等式是怎么来的</a>
+  <a class="lv3" href="#3-2">3.2 放行后为何仍成立</a>
+  <a class="lv3" href="#3-3">3.3 三个直接推论</a>
+  <a class="lv3" href="#3-4">3.4 与令牌计数法的对比</a>
   <a class="lv2" href="#4">4. 三个易错点与对应设计</a>
   <a class="lv3" href="#4-1">4.1 超桶深的包不能截断计费</a>
   <a class="lv3" href="#4-2">4.2 符合性须覆盖任意窗口</a>
@@ -137,7 +141,8 @@
   <a class="lv3" href="#6-3">DUT 行为</a>
   <a class="lv3" href="#6-4">包内 beat 空隙</a>
   <a class="lv2" href="#7">7. 代码结构</a>
-  <a class="lv3" href="#7-1">关键类</a>
+  <a class="lv3" href="#7-1">7.1 关键类</a>
+  <a class="lv3" href="#7-2">7.2 完整版 vs 精简版</a>
   <a class="lv2" href="#8">8. 使用说明</a>
   <a class="lv3" href="#8-1">8.1 环境准备</a>
   <a class="lv3" href="#8-2">8.2 常用命令</a>
@@ -170,6 +175,10 @@
   <h1>dem_buck — 基于令牌桶的 UVM 流控发包器</h1>
   <div class="sub">原理与使用说明 · GCRA 虚拟时间实现 · VCS 2020.12sp2 + UVM</div>
 </header>
+
+<div class="note">
+<p><strong>配套交互动画：</strong><a href="token_bucket_anim.html">token_bucket_anim.html</a> —— 用 9 个可交互演示把本文的原理与实现画出来（桶的运行、TAT 四步推进、截断计费对比、符合性判据、多流共享、包内空隙与背压）。</p>
+</div>
 
 <h2 id="1">1. 它解决什么问题</h2>
 
@@ -220,16 +229,68 @@
 
 <div class="formula">tokens(t) = B − (TAT − t) · R</div>
 
-<p>于是「令牌足够」的判据可以改写成纯时间比较：</p>
+<h3 id="3-1">3.1 这个恒等式是怎么来的</h3>
 
-<div class="formula">tokens ≥ cost &nbsp;⟺&nbsp; t ≥ TAT − (B − cost)/R</div>
+<p><strong>先说直觉。</strong><code>TAT</code> 的物理含义是「桶恢复到满（<code>tokens = B</code>）的那个时刻」。既然从 <code>t</code> 起还要再等 <code>TAT − t</code> 才攒满，而这段时间能攒 <code>(TAT − t)·R</code> 个令牌，那说明此刻<strong>距离满还差 <code>(TAT − t)·R</code></strong> —— 当前库存就是 B 减掉这个缺口。</p>
 
-<p>右侧即该包的<strong>最早放行时刻</strong>，可一次闭式算出。核心代码只有四行：</p>
+<p><strong>再说严格推导。</strong>令牌桶的原生递推是：</p>
+
+<div class="formula">tokens(t + Δ) = min(B, tokens(t) + R·Δ)</div>
+
+<p>先把 <code>min</code> 摘掉。那么 <code>tokens</code> 就是时间的一次函数，斜率恒为 R。一次函数只要给定「一个锚点 + 斜率」就被唯一确定 —— GCRA 的技巧就在这里：<strong>不存库存值，而是存那个锚点的横坐标</strong>。挑 <code>tokens = B</code> 的时刻作为锚点，记作 <code>TAT</code>，于是</p>
+
+<div class="formula">tokens(t) = B + R·(t − TAT) = B − (TAT − t)·R</div>
+
+<p>然后把 <code>min</code> 装回来。<code>min(B, ...)</code> 的截断，在虚拟时间里<strong>等价于「TAT 跑到了当前时刻之前」</strong>：</p>
+
+<div class="formula">TAT &lt; t &nbsp;⟺&nbsp; B − (TAT − t)·R &gt; B &nbsp;⟺&nbsp; 桶已满并开始溢出</div>
+
+<p>所以 <code>current_tokens()</code> 里只需要<strong>裁上限</strong>那一行，就完整复刻了原生递推里的 <code>min</code>：</p>
+
+<pre><code>tok = cfg.bucket_size - (tat_ns - $realtime) * R / 1e9;
+return (tok &gt; cfg.bucket_size) ? cfg.bucket_size : tok;   // 只裁上限</code></pre>
+
+<h3 id="3-2">3.2 为什么放行之后恒等式仍然成立</h3>
+
+<p>初值由 <code>configure()</code> 直接按定义反折，恒等式天然成立：</p>
+
+<pre><code>tat_ns = real'($realtime) + tok2ns(cfg.bucket_size - init_tok);
+//       即 TAT - t = (B - tokens) / R</code></pre>
+
+<p>归纳步要证的是「放行后的新库存 = 放行时刻的库存 − cost」。<code>consume()</code> 的推进式是 <code>TAT_new = max(start, TAT_old) + cost/R</code>，分两种情况：</p>
+
+<table>
+<thead><tr><th>情况</th><th>含义</th><th>TAT_new</th><th>代入恒等式</th></tr></thead>
+<tbody>
+<tr><td><code>start ≥ TAT_old</code></td><td>空闲太久，桶早已满，真实库存被上限截断为 B</td><td><code>start + cost/R</code></td><td><code>B − cost = tokens(start) − cost</code> ✓</td></tr>
+<tr><td><code>start &lt; TAT_old</code></td><td>桶未满，库存由 TAT 精确给出</td><td><code>TAT_old + cost/R</code></td><td><code>B − (TAT_old − start)·R − cost = tokens(start) − cost</code> ✓</td></tr>
+</tbody>
+</table>
+
+<p>两种情况都保持不变量，所以恒等式在整条放行序列上永远成立。</p>
+
+<div class="warn">
+<p><strong>推进式里那个内层 <code>max</code> 对应的正是第一种情况。</strong>不加它，TAT 会停在过去，等价于让桶攒出超过 B 的额度 —— 也就是「桶满不溢出」的 bug。它是「桶满即溢出」在虚拟时间下的等价表达。</p>
+</div>
+
+<h3 id="3-3">3.3 三个直接推论</h3>
+
+<p><strong>一、放行判据变成闭式解。</strong>把恒等式代进 <code>tokens ≥ cost</code>：</p>
+
+<div class="formula">tokens ≥ cost &nbsp;⟺&nbsp; B − (TAT − t)·R ≥ cost &nbsp;⟺&nbsp; t ≥ TAT − (B − cost)/R</div>
+
+<p>右侧即该包的<strong>最早放行时刻</strong> <code>earliest_ns</code>，一步算出，不需要任何循环。核心代码只有四行：</p>
 
 <pre><code>t_ns        = real'($realtime);
 earliest_ns = tat_ns - tok2ns(cfg.bucket_size - need);
 start_ns    = (earliest_ns > t_ns) ? earliest_ns : t_ns;
 tat_ns      = ((start_ns > tat_ns) ? start_ns : tat_ns) + tok2ns(need);</code></pre>
+
+<p><strong>二、库存允许为负。</strong>当 <code>TAT − t &gt; B/R</code> 时恒等式给出负值，这正是 oversize 包「借支未来额度」的状态，所以<strong>不能裁下限</strong>（见 <a href="#4-1">4.1</a>）。</p>
+
+<p><strong>三、浮点不漂移。</strong>库存从来没被反复累加，每次都从 TAT 一次算出；而 TAT 自己只做单调加法。</p>
+
+<h3 id="3-4">3.4 与令牌计数法的对比</h3>
 
 <p>相比令牌计数法的收益：</p>
 
@@ -403,6 +464,7 @@ last  ────────────────────────�
 │   ├── buck_if.sv            # 接口：valid/ready + keep/last + DUT 统计回读
 │   ├── buck_transaction.sv   # 事务：len + payload[] 真实载荷
 │   ├── token_bucket.sv       # ★ 令牌桶核心（GCRA）
+│   ├── token_bucket_lite.sv  # 精简版：同算法，无统计
 │   ├── buck_sequence.sv      # 发包 sequence，取令牌后才放行
 │   ├── buck_driver.sv        # 多 beat 驱动 + beat_gap() 钩子 / buck_gap_driver
 │   ├── buck_monitor.sv       # 按 last 聚包 + 协议检查 + 与 DUT 对账
@@ -419,7 +481,7 @@ last  ────────────────────────�
     ├── regress.csh           # 回归脚本
     └── sweep.csh             # 窗口扫描（验证 raw 收敛性）</code></pre>
 
-<h3 id="7-1">关键类</h3>
+<h3 id="7-1">7.1 关键类</h3>
 
 <h4><code>token_bucket_cfg</code></h4>
 <table>
@@ -456,6 +518,83 @@ last  ────────────────────────�
 <tr><td><code>gap_min</code> / <code>gap_max</code></td><td>1 / 3</td><td><code>buck_gap_driver</code>：空隙拍数范围</td></tr>
 </tbody>
 </table>
+
+<h3 id="7-2">7.2 两个版本：<code>token_bucket</code> vs <code>token_bucket_lite</code></h3>
+
+<p>整形算法只有四行，而完整版 <span class="fileref">env/token_bucket.sv</span> 有 273 行 —— 其余全是统计与自检。<span class="fileref">env/token_bucket_lite.sv</span> 把这部分剥掉，只留整形骨架。</p>
+
+<h4>体量对比</h4>
+
+<table>
+<thead><tr><th>　</th><th><code>token_bucket</code></th><th><code>token_bucket_lite</code></th></tr></thead>
+<tbody>
+<tr><td>文件行数</td><td>273</td><td>86（含 20 行注释）</td></tr>
+<tr><td>状态成员</td><td>13 个</td><td>4 个（<code>rate</code> / <code>bucket</code> / <code>tat_ns</code> / <code>sem</code>）</td></tr>
+<tr><td>方法数</td><td>12</td><td>2（<code>tok2ns()</code> / <code>consume()</code>）</td></tr>
+<tr><td>基类</td><td><code>uvm_object</code></td><td>无（纯 class）</td></tr>
+<tr><td>配置方式</td><td><code>token_bucket_cfg</code> 对象</td><td>构造函数参数</td></tr>
+</tbody>
+</table>
+
+<p><strong>整形逻辑逐行一致</strong>，包括那个容易被忽略的内层 <code>max</code>。换句话说：两者发出的包时序完全相同，差别只在「发完之后能不能告诉你发得对不对」。</p>
+
+<h4>精简版去掉了什么</h4>
+
+<table>
+<thead><tr><th>类别</th><th>被移除的内容</th></tr></thead>
+<tbody>
+<tr><td>状态</td><td><code>grant_cnt</code> / <code>total_cost</code> / <code>first_grant</code> / <code>last_grant</code> / <code>total_stall</code> / <code>steady_*</code> / <code>max_excess</code> / <code>f_min</code></td></tr>
+<tr><td>记账</td><td><code>account()</code>（<code>f(t)</code> 的 running 最小值）</td></tr>
+<tr><td>观测</td><td><code>current_tokens()</code> / <code>measured_rate()</code> / <code>steady_rate()</code> / <code>steady_available()</code> / <code>is_conformant()</code> / <code>print_stats()</code></td></tr>
+<tr><td>接口</td><td><code>try_consume()</code> 非阻塞路径</td></tr>
+<tr><td>UVM 能力</td><td>factory 注册、<code>clone</code>/<code>copy</code>、经 <code>config_db</code> 传递、<code>uvm_field_*</code> 自动化</td></tr>
+</tbody>
+</table>
+
+<div class="warn">
+<p><strong>不继承 <code>uvm_object</code> 的代价要想清楚。</strong>精简版不能走 factory override、不能用 <code>uvm_config_db</code> 下发（句柄传递需自行组织）、不参与 <code>print</code>/<code>compare</code> 自动化。如果桶需要在多个组件间共享、或要被 testcase 替换实现，直接用完整版。</p>
+</div>
+
+<h4>精简版保留了什么</h4>
+
+<p>有两处看似「可以再砍」的代码被刻意留下：</p>
+
+<p><strong>一、构造时的参数校验。</strong><code>rate &lt;= 0</code> 会让 <code>tok2ns()</code> 除零，<code>bucket &lt;= 0</code> 会让每个包都 stall 满额 —— 这两个错误如果不在构造时 fatal，表现出来是难以定位的仿真挂死，而不是报错。</p>
+
+<p><strong>二、<code>cost &lt;= 0</code> 直接 return。</strong>完整版靠 <code>effective_cost()</code> 挡住，精简版里这是<strong>唯一必须保留的防御</strong>：</p>
+
+<pre><code>// 负 cost 会把 tat 往回拨, 破坏单调性
+if (cost &lt;= 0.0) return;</code></pre>
+
+<p>这不是「给不可能的场景加校验」，而是状态机不变量的守卫 —— <code>tat_ns</code> 必须单调不减，一旦被拨回，之后整个桶的状态全错，且不会有任何报错。</p>
+
+<p>至于 oversize，精简版与完整版<strong>行为相同</strong>（都按实际 cost 计费、自动延长等待、绝不截断，见 <a href="#4-1">4.1</a>），只是不再打 warning。</p>
+
+<h4>用法</h4>
+
+<pre><code>token_bucket_lite tb;
+
+tb = new(10e6, 1024);          // 10 MB/s, 桶深 1024, 默认装满
+tb = new(10e6, 1024, 0.0);     // 空桶起步, 无开场突发
+...
+tb.consume(tr.len);            // 阻塞到该放行时刻</code></pre>
+
+<h4>该选哪个</h4>
+
+<table>
+<thead><tr><th>场景</th><th>选择</th></tr></thead>
+<tbody>
+<tr><td>要对速率下断言、要 raw / steady / conformant 数字</td><td><code>token_bucket</code></td></tr>
+<tr><td>需要 <code>try_consume()</code> 非阻塞接口</td><td><code>token_bucket</code></td></tr>
+<tr><td>桶要经 <code>config_db</code> 共享、或要被 factory 替换</td><td><code>token_bucket</code></td></tr>
+<tr><td>只是给背景流量限个速，不关心精确值</td><td><code>token_bucket_lite</code></td></tr>
+<tr><td>多个 agent 各自限速、不需要汇总报告</td><td><code>token_bucket_lite</code></td></tr>
+</tbody>
+</table>
+
+<div class="note">
+<p><strong>为什么完整版值得那 110 行统计代码。</strong>DUT 的 checker 只能证明「数据搬对了」，它对激励速率一无所知 —— 如果发包器因为一个符号写反而跑出了 1.3 倍速率，回归照样全绿，而你以为自己验的是 10 MB/s 场景。<strong>整形器是激励的一部分，没有任何外部观测者能校验它</strong>，所以它必须自带自检。本工程的 6 个 case 全部使用完整版；精简版定位为「已经信赖该算法之后的轻量复用」。</p>
+</div>
 
 <h2 id="8">8. 使用说明</h2>
 
