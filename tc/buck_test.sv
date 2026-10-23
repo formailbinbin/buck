@@ -30,6 +30,20 @@ class tc_buck_base extends uvm_test;
         bkt_cfg.init_tokens         = -1.0;     // 初始装满
     endfunction
 
+    // 滑窗拟合的期望包络, 供 buck_win_stats 的契约比对使用
+    //
+    // exp_R: 期望速率, 单位 byte/us。默认口径是"1 令牌 = 1 byte",
+    //        故 byte/us = (token/s) / 1e6。按 pps 限速的 case 需重载。
+    // exp_B: 期望桶深, 单位 byte。契约比对对这一项是单侧判的(只有拟合截距
+    //        超出 bucket_size 才报), 所以配上也不会误报; 但只在"开场满桶且
+    //        真把突发用光"的 case 才有分辨力 —— 别的 case 突发信用从未攒满,
+    //        拟合截距远小于 bucket_size, 这道上界检查松得抓不住任何东西。
+    //        因此默认不给, 由需要的 case 自己配。
+    virtual function void set_win_exp();
+        uvm_config_db#(real)::set(this, "env.win_stats", "exp_R",
+                                  bkt_cfg.rate_tokens_per_sec / 1.0e6);
+    endfunction
+
     virtual function int unsigned get_num_items();
         int unsigned n;
         int unsigned arg;
@@ -46,6 +60,7 @@ class tc_buck_base extends uvm_test;
         bkt_cfg = token_bucket_cfg::type_id::create("bkt_cfg");
         set_bucket_cfg();
         uvm_config_db#(token_bucket_cfg)::set(this, "env", "bkt_cfg", bkt_cfg);
+        set_win_exp();
 
         env = buck_env::type_id::create("env", this);
     endfunction
@@ -132,6 +147,13 @@ class tc_buck_burst extends tc_buck_base;
         bkt_cfg.init_tokens         = -1.0;      // 装满 -> 开场即突发
     endfunction
 
+    // 本 case 开场满桶且突发信用会被用光, 滑窗拟合的截距应当收敛到桶深,
+    // 因此 exp_B 在这里是可比的 (实测 fit_B = 8082, 偏 -1.3%)
+    virtual function void set_win_exp();
+        super.set_win_exp();
+        uvm_config_db#(real)::set(this, "env.win_stats", "exp_B", bkt_cfg.bucket_size);
+    endfunction
+
     virtual function void print_result();
         real cfg_rate, raw_rate, std_rate, raw_err, std_err;
 
@@ -178,6 +200,13 @@ class tc_buck_pps extends tc_buck_base;
         bkt_cfg.rate_tokens_per_sec = 100.0e3;   // 100 Kpps
         bkt_cfg.bucket_size         = 16.0;      // 最多攒 16 个包的突发
         bkt_cfg.init_tokens         = 0.0;
+    endfunction
+
+    // 本 case 的令牌单位是"包"而非"字节", 而滑窗统计的是字节,
+    // 换算需乘上定长包长: 100 Kpps * 64 byte = 6.4 byte/us
+    virtual function void set_win_exp();
+        uvm_config_db#(real)::set(this, "env.win_stats", "exp_R",
+                                  bkt_cfg.rate_tokens_per_sec * 64.0 / 1.0e6);
     endfunction
 
     virtual task run_seq(uvm_phase phase);
