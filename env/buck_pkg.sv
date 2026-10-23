@@ -12,9 +12,11 @@ package buck_pkg;
 
     `include "buck_transaction.sv"
     `include "token_bucket.sv"
+    `include "token_bucket_lite.sv"
     `include "buck_sequence.sv"
     `include "buck_driver.sv"
     `include "buck_monitor.sv"
+    `include "buck_win_stats.sv"
     `include "buck_env.sv"
     `include "buck_test.sv"
 
