@@ -1,0 +1,1417 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>滑动窗口统计 原理与过程 交互动画</title>
+<style>
+  :root{
+    --bg:#fff; --fg:#1f2328; --muted:#656d76; --line:#d1d9e0;
+    --code-bg:#f6f8fa; --accent:#0969da; --warn-bg:#fff8c5; --warn-line:#d4a72c;
+    --ok-bg:#dafbe1; --ok-line:#2da44e; --bad-bg:#ffebe9; --bad-line:#cf222e;
+    --tok:#2da44e; --pkt:#0969da; --wait:#d4a72c; --win:#8250df; --peak:#cf222e;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; padding:0 24px 80px;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans",
+                "PingFang SC","Microsoft YaHei",Helvetica,Arial,sans-serif;
+    font-size:16px; line-height:1.7; color:var(--fg); background:var(--bg);
+  }
+  .wrap{max-width:1000px; margin:0 auto}
+  header{padding:40px 0 20px; border-bottom:1px solid var(--line)}
+  h1{font-size:28px; margin:0 0 8px; font-weight:600}
+  .sub{color:var(--muted); font-size:15px}
+  h2{font-size:22px; font-weight:600; margin:44px 0 14px; padding-bottom:8px; border-bottom:1px solid var(--line)}
+  h3{font-size:17px; font-weight:600; margin:28px 0 10px}
+  p{margin:12px 0}
+  code{font-family:ui-monospace,Consolas,monospace; font-size:85%;
+       background:var(--code-bg); padding:.2em .4em; border-radius:6px; white-space:nowrap}
+  pre{background:var(--code-bg); border-radius:6px; padding:14px; overflow-x:auto; margin:14px 0}
+  pre code{background:none; padding:0; font-size:13px; white-space:pre}
+  table{border-collapse:collapse; width:100%; margin:14px 0; font-size:14.5px}
+  th,td{border:1px solid var(--line); padding:6px 12px; text-align:left}
+  th{background:var(--code-bg); font-weight:600}
+  td.num{text-align:right; font-family:ui-monospace,Consolas,monospace}
+  .note,.warn,.good,.bad{padding:12px 16px; margin:14px 0; border-radius:6px;
+       border-left:4px solid var(--accent); background:#ddf4ff}
+  .warn{border-left-color:var(--warn-line); background:var(--warn-bg)}
+  .good{border-left-color:var(--ok-line); background:var(--ok-bg)}
+  .bad{border-left-color:var(--bad-line); background:var(--bad-bg)}
+  .note p:first-child,.warn p:first-child,.good p:first-child,.bad p:first-child{margin-top:0}
+  .note p:last-child,.warn p:last-child,.good p:last-child,.bad p:last-child{margin-bottom:0}
+  .formula{background:var(--code-bg); border:1px solid var(--line); border-radius:6px;
+       padding:12px 16px; margin:14px 0; text-align:center;
+       font-family:ui-monospace,Consolas,monospace; font-size:15px; overflow-x:auto}
+  footer{margin-top:56px; padding-top:20px; border-top:1px solid var(--line);
+       color:var(--muted); font-size:13.5px}
+  a{color:var(--accent)}
+
+  /* ---- 演示面板 ---- */
+  .demo{border:1px solid var(--line); border-radius:8px; margin:20px 0; overflow:hidden}
+  .demo-bar{
+    display:flex; flex-wrap:wrap; gap:8px; align-items:center;
+    padding:10px 14px; background:var(--code-bg); border-bottom:1px solid var(--line);
+  }
+  .demo-body{padding:16px}
+  button{
+    font-family:inherit; font-size:13.5px; padding:5px 13px; border-radius:6px;
+    border:1px solid var(--line); background:var(--bg); color:var(--fg); cursor:pointer;
+  }
+  button:hover{background:#eaeef2}
+  button.primary{background:var(--accent); color:#fff; border-color:var(--accent)}
+  button.primary:hover{opacity:.88}
+  button:disabled{opacity:.45; cursor:default}
+  label.ctl{font-size:13px; color:var(--muted); display:flex; align-items:center; gap:6px}
+  label.ctl input[type=range]{width:110px; vertical-align:middle}
+  label.ctl b{color:var(--fg); font-family:ui-monospace,Consolas,monospace; min-width:52px; display:inline-block}
+  .seg{display:flex; border:1px solid var(--line); border-radius:6px; overflow:hidden}
+  .seg button{border:0; border-radius:0; border-right:1px solid var(--line)}
+  .seg button:last-child{border-right:0}
+  .seg button.on{background:var(--accent); color:#fff}
+  canvas{display:block; width:100%; background:var(--bg)}
+  .readout{
+    display:grid; grid-template-columns:repeat(auto-fit,minmax(132px,1fr)); gap:8px;
+    margin-top:12px; font-size:13px;
+  }
+  .ro{background:var(--code-bg); border:1px solid var(--line); border-radius:6px; padding:7px 10px}
+  .ro .k{color:var(--muted); font-size:12px; display:block}
+  .ro .v{font-family:ui-monospace,Consolas,monospace; font-size:14px; font-weight:600}
+  .ro.ok .v{color:#116329}
+  .ro.bad .v{color:#a40e26}
+  .legend{display:flex; flex-wrap:wrap; gap:14px; font-size:12.5px; color:var(--muted); margin-top:10px}
+  .legend i{display:inline-block; width:11px; height:11px; border-radius:2px; margin-right:5px; vertical-align:-1px}
+  .steps{font-size:13px; margin-top:12px}
+  .steps .s{
+    padding:6px 10px; border-left:3px solid transparent; border-radius:0 6px 6px 0;
+    color:var(--muted); font-family:ui-monospace,Consolas,monospace; white-space:pre-wrap;
+  }
+  .steps .s.on{background:#ddf4ff; border-left-color:var(--accent); color:var(--fg)}
+  .log{
+    margin-top:12px; max-height:150px; overflow-y:auto; background:var(--code-bg);
+    border:1px solid var(--line); border-radius:6px; padding:8px 10px;
+    font-family:ui-monospace,Consolas,monospace; font-size:12.5px; line-height:1.6;
+  }
+  .log div{white-space:pre-wrap}
+  .log .hl{color:var(--accent); font-weight:600}
+  .log .wv{color:#9a6700}
+  .log .bv{color:#a40e26; font-weight:600}
+
+  /* ---- 侧边导航 ---- */
+  h2,h3{scroll-margin-top:24px}
+  #nav{position:fixed; top:0; left:0; width:252px; height:100vh; overflow-y:auto;
+       padding:26px 14px 40px; background:var(--code-bg); border-right:1px solid var(--line);
+       font-size:13.5px; line-height:1.5; z-index:20}
+  #nav .nav-title{font-weight:600; font-size:14px; padding:0 10px 12px; margin-bottom:10px;
+       border-bottom:1px solid var(--line)}
+  #nav .nav-title span{display:block; font-weight:400; font-size:12px; color:var(--muted); margin-top:2px}
+  #nav a{display:block; padding:5px 10px; margin:1px 0; border-radius:6px; color:var(--muted);
+       text-decoration:none; border-left:3px solid transparent}
+  #nav a.lv2{color:var(--fg)}
+  #nav a:hover{background:#eaeef2; color:var(--accent)}
+  #nav a.active{background:#ddf4ff; color:var(--accent); font-weight:600; border-left-color:var(--accent)}
+  body.has-nav .wrap{margin-left:252px}
+  #nav-toggle{display:none; position:fixed; top:12px; left:12px; z-index:30;
+       width:38px; height:38px; border:1px solid var(--line); border-radius:6px;
+       background:var(--bg); font-size:17px; line-height:1; cursor:pointer}
+  @media (max-width:1240px){
+    #nav{transform:translateX(-100%); transition:transform .2s ease}
+    #nav.open{transform:none; box-shadow:0 0 0 100vmax rgba(0,0,0,.25)}
+    body.has-nav .wrap{margin-left:0}
+    #nav-toggle{display:block}
+    header{padding-top:58px}
+  }
+</style>
+</head>
+<body class="has-nav">
+
+<button id="nav-toggle" title="目录">&#9776;</button>
+
+<nav id="nav">
+  <div class="nav-title">滑动窗口统计 交互动画<span>滑窗 · 峰值 · 反推 R/B</span></div>
+  <a class="lv2" href="#1">1. 窗口在滑动：半开区间 (t−W, t]</a>
+  <a class="lv2" href="#2">2. 为什么峰值只会落在到达时刻</a>
+  <a class="lv2" href="#3">3. 固定窗口均值 vs 滑窗峰值</a>
+  <a class="lv2" href="#4">4. 多档窗口同时跑</a>
+  <a class="lv2" href="#5">5. peak(W) 曲线与那条直线</a>
+  <a class="lv2" href="#6">6. 两道过滤：哪些点不能要</a>
+  <a class="lv2" href="#7">7. 等比 vs 等差：档位怎么排</a>
+  <a class="lv2" href="#8">8. 速查</a>
+</nav>
+
+<div class="wrap">
+
+<header>
+<h1>滑动窗口统计：原理与动态过程</h1>
+<div class="sub">
+  dem_buck · <code>env/buck_win_stats.sv</code> 的可视化对照版 ·
+  配套文档 <a href="令牌桶与滑窗统计.html">令牌桶与滑窗统计.html</a>
+</div>
+</header>
+
+<p>本页把滑窗统计的每一步做成动画：窗口如何滑、峰值如何被刷新、多档窗口如何联立出 <code>R</code> 与 <code>B</code>。每个演示都标出它对应 <code>buck_win_stats.sv</code> 的哪一段代码。</p>
+
+<div class="note">
+<p><strong>术语约定。</strong><code>W</code> = 窗口宽度；<code>peak(W)</code> = 所有位置的 <code>W</code> 宽窗口里字节数的最大值；<code>depth</code> = 取到峰值时窗口内的包数。本页时间单位统一用 <strong>us</strong>，字节用 <strong>byte</strong>。时间戳取<strong>包的末 beat</strong>，即整包字节记在它传输完成的瞬间。</p>
+</div>
+
+<h2 id="1">1. 窗口在滑动：半开区间 (t−W, t]</h2>
+
+<p>一个固定宽度 <code>W</code> 的窗口，右端点钉在「最新到达的那个包」上。每来一个包，就把它压进队尾、加进 <code>sum</code>，再把左端滑出去的包逐个弹掉、从 <code>sum</code> 里减掉。</p>
+
+<div class="demo">
+<div class="demo-bar">
+  <button class="primary" id="d1-run">▶ 开始</button>
+  <button id="d1-step">单步</button>
+  <button id="d1-reset">重置</button>
+  <label class="ctl">窗口 W <input type="range" id="d1-w" min="20" max="300" value="120" step="10"><b id="d1-wv">120 us</b></label>
+  <label class="ctl">到达间隔 <input type="range" id="d1-iv" min="10" max="80" value="30" step="5"><b id="d1-ivv">30 us</b></label>
+</div>
+<div class="demo-body">
+  <canvas id="d1-cv"></canvas>
+  <div class="legend">
+    <span><i style="background:var(--pkt)"></i>窗口内的包（计入 sum）</span>
+    <span><i style="background:#d1d9e0"></i>已滑出窗口</span>
+    <span><i style="background:var(--win)"></i>当前窗口 (t−W, t]</span>
+    <span><i style="background:var(--peak)"></i>历史峰值</span>
+  </div>
+  <div class="readout">
+    <div class="ro" id="d1-ro-sum"><span class="k">窗口内 sum</span><span class="v">0</span></div>
+    <div class="ro" id="d1-ro-dep"><span class="k">窗口内包数 depth</span><span class="v">0</span></div>
+    <div class="ro" id="d1-ro-pk"><span class="k">peak(W)</span><span class="v">0</span></div>
+    <div class="ro" id="d1-ro-pd"><span class="k">峰值处 depth</span><span class="v">0</span></div>
+    <div class="ro" id="d1-ro-q"><span class="k">队列长度</span><span class="v">0</span></div>
+  </div>
+  <div class="log" id="d1-log"></div>
+</div>
+</div>
+
+<p>注意看日志里的弹出动作：<strong>队列只在左端弹、只在右端压</strong>，<code>sum</code> 是增量维护的，从不重新遍历。每个包一生只被压入一次、弹出一次，所以均摊下来每次 <code>add()</code> 是 <code>O(1)</code>，跟窗口里装了多少包无关。</p>
+
+<pre><code>// sliding_window::add() —— 这段就是上面的动画
+lo = t_ns - width_ns;
+t_q.push_back(t_ns);  b_q.push_back(nbytes);  sum += nbytes;
+while (t_q.size() > 0 && t_q[0] &lt;= lo) begin      // 半开区间故用 &lt;=
+    sum -= b_q[0];  void'(t_q.pop_front());  void'(b_q.pop_front());
+end
+if (sum > peak_bytes) begin
+    peak_bytes = sum;  peak_end_ns = t_ns;  peak_depth = t_q.size();
+end</code></pre>
+
+<div class="note">
+<p><strong>为什么是半开区间 <code>(t−W, t]</code>。</strong>弹出条件写 <code>t_q[0] <= lo</code> 而不是 <code>&lt;</code>，意味着恰好落在左端点 <code>t−W</code> 上的包<strong>算滑出</strong>。这样任意两个相距正好 <code>W</code> 的包不会被同一个窗口同时装下，窗口「宽度」才名副其实。若用闭区间，宽 <code>W</code> 的窗口实际能覆盖 <code>W</code> 加一个时刻点，峰值会系统性偏大。</p>
+</div>
+
+<h2 id="2">2. 为什么峰值只会落在到达时刻</h2>
+
+<p>窗口可以放在时间轴的任意位置，位置是连续的、无穷多个。但组件只在<strong>包到达的那些离散时刻</strong>检查了峰值 —— 这样会不会漏掉真正的最大值？</p>
+
+<div class="demo">
+<div class="demo-bar">
+  <button class="primary" id="d2-run">▶ 连续平移窗口</button>
+  <button id="d2-reset">重置</button>
+  <label class="ctl">窗口 W <input type="range" id="d2-w" min="30" max="260" value="140" step="10"><b id="d2-wv">140 us</b></label>
+</div>
+<div class="demo-body">
+  <canvas id="d2-cv"></canvas>
+  <div class="legend">
+    <span><i style="background:var(--win)"></i>自由平移的窗口</span>
+    <span><i style="background:var(--pkt)"></i>被窗口覆盖的包</span>
+    <span><i style="background:var(--peak)"></i>右端点贴在到达时刻</span>
+  </div>
+  <div class="readout">
+    <div class="ro" id="d2-ro-sum"><span class="k">当前窗口字节</span><span class="v">0</span></div>
+    <div class="ro" id="d2-ro-max"><span class="k">平移过程最大值</span><span class="v">0</span></div>
+    <div class="ro" id="d2-ro-dis"><span class="k">只查到达时刻的最大值</span><span class="v">0</span></div>
+    <div class="ro" id="d2-ro-eq"><span class="k">两者是否相等</span><span class="v">—</span></div>
+  </div>
+</div>
+</div>
+
+<p>把窗口从左扫到右，下方折线是窗口内字节数随位置的变化。它是<strong>阶梯状</strong>的：窗口右端点越过一个包时整包跳上去一级，左端点越过一个包时整包掉下来一级。</p>
+
+<div class="good">
+<p><strong>结论：峰值必然在某个「右端点恰好压住一个到达时刻」的位置取到。</strong>理由是把窗口向右平移一点点，只有两种后果 —— 要么没跨过任何包，字节数不变；要么左端点先滑掉一个包，字节数下降。所以从任意位置出发向右推到「右端点撞上下一个到达时刻」为止，字节数只增不减。<strong>连续的无穷多个位置，因此被压缩成有限个到达时刻</strong>，这就是只需在 <code>add()</code> 里检查峰值的全部依据。</p>
+</div>
+
+<div class="warn">
+<p>这个性质依赖「字节在离散时刻整包记账」这一建模。<code>buck_win_stats</code> 取包的<strong>末 beat</strong> 时刻，所以一个包的字节全部算在它传完的瞬间 —— 包在总线上传输的那段时间里，字节并非均匀地流进窗口。这正是后面 <a href="#6">§6</a> 要裁掉 <code>depth &lt;= 1</code> 那些行的原因。</p>
+</div>
+
+<h2 id="3">3. 固定窗口均值 vs 滑窗峰值</h2>
+
+<p><code>monitor</code> 的 <code>measured_Bps()</code> 只给「首包到末包」这一个固定窗口的平均值。下面把同一条包流同时喂给两种口径，看它们各自测到什么。</p>
+
+<div class="demo">
+<div class="demo-bar">
+  <button class="primary" id="d3-run">▶ 开始</button>
+  <button id="d3-reset">重置</button>
+  <label class="ctl">开场突发 <input type="range" id="d3-burst" min="0" max="2400" value="1600" step="200"><b id="d3-bv">1600 B</b></label>
+  <label class="ctl">窗口 W <input type="range" id="d3-w" min="40" max="400" value="160" step="20"><b id="d3-wv">160 us</b></label>
+</div>
+<div class="demo-body">
+  <canvas id="d3-cv"></canvas>
+  <div class="legend">
+    <span><i style="background:var(--pkt)"></i>包</span>
+    <span><i style="background:var(--win)"></i>滑窗峰值所在位置</span>
+    <span><i style="background:var(--muted)"></i>全程平均</span>
+  </div>
+  <div class="readout">
+    <div class="ro" id="d3-ro-avg"><span class="k">全程平均速率</span><span class="v">—</span></div>
+    <div class="ro" id="d3-ro-pk"><span class="k">滑窗峰值速率</span><span class="v">—</span></div>
+    <div class="ro" id="d3-ro-ratio"><span class="k">峰均比</span><span class="v">—</span></div>
+    <div class="ro" id="d3-ro-pos"><span class="k">峰值右端点</span><span class="v">—</span></div>
+  </div>
+</div>
+</div>
+
+<p>把<strong>开场突发</strong>拉大：全程平均几乎不动（分母是整个仿真跨度，一次突发摊薄了），但滑窗峰值立刻抬高。<strong>平均值回答「总共发了多快」，滑窗峰值回答「最密的那一瞬间有多密」</strong> —— 后者才是整形器要卡的东西。</p>
+
+<div class="warn">
+<p>反过来，平均值也有它不可替代的地方：滑窗峰值<strong>不受「自愿 idle」影响</strong>，一段长时间不发包不会把峰值拉低。所以两个口径互为补充，组件不在这里重算平均，需要平均值时看 <code>monitor</code>。</p>
+</div>
+
+<h2 id="4">4. 多档窗口同时跑</h2>
+
+<p>单一个 <code>W</code> 只能给出一个数 <code>peak(W)</code>。而契约 <code>cost(T) ≤ R·T + B</code> 有<strong>两个</strong>未知数，一个方程解不出来。所以组件在一次仿真里<strong>并行维护多个宽度的窗口</strong>，每来一个包就挨个喂进去。</p>
+
+<div class="demo">
+<div class="demo-bar">
+  <button class="primary" id="d4-run">▶ 开始</button>
+  <button id="d4-step">单步</button>
+  <button id="d4-reset">重置</button>
+  <label class="ctl">R <input type="range" id="d4-r" min="2" max="20" value="8" step="1"><b id="d4-rv">8 B/us</b></label>
+  <label class="ctl">B <input type="range" id="d4-b" min="200" max="2000" value="800" step="100"><b id="d4-bv">800 B</b></label>
+</div>
+<div class="demo-body">
+  <canvas id="d4-cv"></canvas>
+  <div class="legend">
+    <span><i style="background:var(--pkt)"></i>窗口内字节</span>
+    <span><i style="background:var(--peak)"></i>该档历史峰值</span>
+    <span><i style="background:#d1d9e0"></i>窗口剩余容量</span>
+  </div>
+  <div class="readout">
+    <div class="ro" id="d4-ro-t"><span class="k">当前时刻</span><span class="v">0 us</span></div>
+    <div class="ro" id="d4-ro-n"><span class="k">已记包数</span><span class="v">0</span></div>
+    <div class="ro" id="d4-ro-span"><span class="k">采样跨度</span><span class="v">0 us</span></div>
+  </div>
+  <div class="log" id="d4-log"></div>
+</div>
+</div>
+
+<p>每一行是一个独立的 <code>sliding_window</code> 实例，共用同一串 <code>add()</code> 调用。观察两件事：</p>
+
+<ul>
+<li><strong>窄窗口很快就「满」了</strong> —— 它的峰值早早定格，因为它装不下更多包，再长的仿真也抬不高它。</li>
+<li><strong>宽窗口的峰值一直在涨</strong> —— 它还在不断装进新包，直到窗口宽度超过整个采样跨度为止。</li>
+</ul>
+
+<div class="formula">peak(W) ≈ R · W + B<br><span style="font-size:13px; color:#656d76">窄窗：B 占主导（突发信用）　宽窗：R·W 占主导（持续速率）</span></div>
+
+<p>这就是为什么<strong>多档窗口能分离 R 和 B</strong>：窄端的点主要由桶深撑起来，宽端的点主要由速率撑起来，两端一起上才能把截距和斜率同时定下来。</p>
+
+<h2 id="5">5. peak(W) 曲线与那条直线</h2>
+
+<p>§4 跑完一遍，手里就有一组点 <code>(W₁, peak₁), (W₂, peak₂), …</code>。契约说这些点该落在一条直线上：<strong>斜率是 R，截距是 B</strong>。于是「反推配置」就变成了一道最小二乘拟合题。</p>
+
+<div class="formula">peak(W) = R · W + B　⟶　对 (W, peak) 做一元线性回归</div>
+
+<div class="demo">
+<div class="demo-bar">
+  <button class="primary" id="d5-run">▶ 开始</button>
+  <button id="d5-reset">重置</button>
+  <label class="ctl">R <input type="range" id="d5-r" min="2" max="20" value="8" step="1"><b id="d5-rv">8 B/us</b></label>
+  <label class="ctl">B <input type="range" id="d5-b" min="200" max="2400" value="800" step="100"><b id="d5-bv">800 B</b></label>
+</div>
+<div class="demo-body">
+  <canvas id="d5-cv"></canvas>
+  <div class="legend">
+    <span><i style="background:var(--pkt)"></i>实测点 (W, peak)</span>
+    <span><i style="background:var(--peak)"></i>最小二乘拟合线</span>
+    <span><i style="background:#8c959f"></i>理论线 R·W + B</span>
+  </div>
+  <div class="readout">
+    <div class="ro" id="d5-ro-n"><span class="k">已记包数</span><span class="v">0</span></div>
+    <div class="ro" id="d5-ro-fr"><span class="k">fit_R</span><span class="v">–</span></div>
+    <div class="ro" id="d5-ro-er"><span class="k">R 误差</span><span class="v">–</span></div>
+    <div class="ro" id="d5-ro-fb"><span class="k">fit_B</span><span class="v">–</span></div>
+    <div class="ro" id="d5-ro-eb"><span class="k">B 误差</span><span class="v">–</span></div>
+  </div>
+</div>
+</div>
+
+<p>看三件事：</p>
+
+<ul>
+<li>刚开跑时点全趴在低位，拟合线乱飘 —— 样本还不够，每档窗口都没碰上它这辈子最挤的那一刻。</li>
+<li>包越来越多，各档峰值逐个「顶住」，点列慢慢贴上灰色理论线，<code>fit_R</code> / <code>fit_B</code> 随之收敛。</li>
+<li>峰值<strong>只增不减</strong>，所以每个点只会往上爬。这意味着仿真时间不够时，结果一定<strong>偏小</strong>，不会偏大 —— 误差方向是可预期的。</li>
+</ul>
+
+<pre><code>// fit_line(): 对各档 (W, peak) 做最小二乘
+den   = n * sxx - sx * sx;
+fit_R = (n * sxy - sx * sy) / den;      // 斜率 → 速率 R
+fit_B = (sy - fit_R * sx) / n;          // 截距 → 桶深 B</code></pre>
+
+<div class="note">
+<p><strong>为什么截距就是桶深。</strong>把直线外推回 <code>W = 0</code>，问的是「时间宽度趋近于零时还能挤出多少字节」—— 那正是桶里预存的信用 <code>B</code>。所以<strong>窄端的点决定截距准不准</strong>：窄端太疏，外推出来的 <code>B</code> 方差就大。</p>
+</div>
+
+<h2 id="6">6. 两道过滤：哪些点不能要</h2>
+
+<p>不是每个 <code>(W, peak)</code> 都能进拟合。有两类点天生不在那条直线上，混进来会把斜率和截距一起带偏，<code>fit_line()</code> 开头两行就是把它们挡在门外。</p>
+
+<pre><code>foreach (win[i]) begin
+    if (win[i].peak_depth &lt;= 1)      continue;   // 装不下两个包
+    if (win[i].width() &gt; span_ns)    continue;   // 比采样跨度还宽
+    ...
+end</code></pre>
+
+<div class="demo">
+<div class="demo-bar">
+  <button class="primary" id="d6-run">▶ 延长采样</button>
+  <button id="d6-reset">重置</button>
+  <label class="ctl">采样包数 <input type="range" id="d6-n" min="20" max="700" value="60" step="10"><b id="d6-nv">60</b></label>
+  <label class="ctl"><input type="checkbox" id="d6-f1" checked> 剔除 depth≤1</label>
+  <label class="ctl"><input type="checkbox" id="d6-f2" checked> 剔除 W&gt;span</label>
+</div>
+<div class="demo-body">
+  <canvas id="d6-cv"></canvas>
+  <div class="legend">
+    <span><i style="background:var(--pkt)"></i>入选点</span>
+    <span><i style="background:#8c959f"></i>被剔除的点</span>
+    <span><i style="background:var(--peak)"></i>当前拟合线</span>
+    <span><i style="background:var(--win)"></i>采样跨度 span</span>
+  </div>
+  <div class="readout">
+    <div class="ro" id="d6-ro-span"><span class="k">采样跨度</span><span class="v">0 us</span></div>
+    <div class="ro" id="d6-ro-n"><span class="k">入选点数</span><span class="v">0</span></div>
+    <div class="ro" id="d6-ro-fr"><span class="k">fit_R（真值 8）</span><span class="v">–</span></div>
+    <div class="ro" id="d6-ro-fb"><span class="k">fit_B（真值 800）</span><span class="v">–</span></div>
+  </div>
+</div>
+</div>
+
+<p>把两个勾去掉，看误差怎么炸：</p>
+
+<ul>
+<li><strong><code>peak_depth ≤ 1</code></strong> —— 窗口太窄，连两个包都装不下，<code>peak</code> 恒等于<strong>单包字节数</strong>，跟 <code>W</code> 没有关系。这些点在图上是一排<strong>贴地的水平点</strong>，它们反映的是总线粒度而不是令牌桶，会把截距硬往下拽。</li>
+<li><strong><code>W > span</code></strong> —— 窗口比整段采样还宽，窗口里永远装着<strong>全部</strong>包，<code>peak</code> 饱和成一个常数。这些点在图上是一排<strong>贴顶的水平点</strong>，把斜率往下压。</li>
+</ul>
+
+<div class="good">
+<p>拖动「采样包数」能看到第二道过滤的动态含义：<strong>span 在涨，合格的宽窗口就一档一档被解锁</strong>。所以宽端档位不是白设的，只是要等仿真跑够长它才开始说话。</p>
+</div>
+
+<div class="warn">
+<p>两道过滤后若<strong>剩不到两个点</strong>，斜率与截距无法分离，<code>fit_line()</code> 直接把 <code>fit_n</code> 置 0 放弃拟合。看到报告里 <code>fit_n = 0</code>，先查是不是仿真太短或档位设得离谱，而不是怀疑 DUT。</p>
+</div>
+
+<h2 id="7">7. 等比 vs 等差：档位怎么排</h2>
+
+<p>档位区间默认是 <code>10us ~ 10000us</code>，横跨三个数量级。在这样的区间里，<strong>等比和等差不是风格差异，是能用与不能用的差异</strong>。</p>
+
+<div class="demo">
+<div class="demo-bar">
+  <button class="primary" id="d7-run">▶ 扫描 B</button>
+  <button id="d7-reset">重置</button>
+  <label class="ctl">R <input type="range" id="d7-r" min="2" max="20" value="8" step="1"><b id="d7-rv">8 B/us</b></label>
+  <label class="ctl">B <input type="range" id="d7-b" min="200" max="4000" value="800" step="100"><b id="d7-bv">800 B</b></label>
+</div>
+<div class="demo-body">
+  <canvas id="d7-cv"></canvas>
+  <div class="legend">
+    <span><i style="background:var(--pkt)"></i>等比档位</span>
+    <span><i style="background:var(--wait)"></i>等差档位</span>
+    <span><i style="background:var(--win)"></i>拐点 W* = B/R</span>
+    <span><i style="background:#8c959f"></i>被过滤掉的档</span>
+  </div>
+  <div class="readout">
+    <div class="ro" id="d7-ro-wk"><span class="k">拐点 B/R</span><span class="v">–</span></div>
+    <div class="ro" id="d7-ro-g"><span class="k">等比 fit_R / 点数</span><span class="v">–</span></div>
+    <div class="ro" id="d7-ro-ge"><span class="k">等比 R 误差</span><span class="v">–</span></div>
+    <div class="ro" id="d7-ro-l"><span class="k">等差 fit_R / 点数</span><span class="v">–</span></div>
+    <div class="ro" id="d7-ro-le"><span class="k">等差 R 误差</span><span class="v">–</span></div>
+  </div>
+</div>
+</div>
+
+<p>横轴是<strong>对数</strong>刻度。等比档位在对数轴上等间距铺开，等差档位则全部挤在右端 —— 区间 <code>[10, 10000]</code> 的等差步长是 <code>(10000 − 10) / 7 ≈ 1427us</code>，于是档位是 <code>10 / 1437 / 2864 / … / 10000</code>：<strong>第一档和第二档之间空了 1427us 的无人区</strong>。</p>
+
+<p>而拐点 <code>W* = B/R</code> 正落在这片无人区里（拖 B 滑块看紫线怎么走）。拐点以左的点才带桶深信息，可等差在那一侧只剩 <code>10us</code> 一个孤点，还经常因为 <code>peak_depth ≤ 1</code> 被过滤掉 —— 截距就彻底没人支撑了。</p>
+
+<div class="bad">
+<p><strong>闭环论证。</strong>等差要成立，必须把区间收窄到一个数量级以内；可收窄的前提是<strong>事先知道拐点在哪</strong>，而拐点 <code>= B/R</code> 恰恰就是待拟合的那两个未知数。拟合的前提是 R、B 未知；既然未知，就没有依据去挑那个窄区间；挑不了窄区间，就只能跨量级；跨了量级，就只能等比。</p>
+</div>
+
+<div class="note">
+<p><strong>所以 <code>win_log</code> 是兼容开关，不是调优旋钮。</strong>常规验证一律用默认等比，不要按 case 去切。要在某个可疑宽度附近做局部精查，请直接给 <code>win_us</code> 显式列表（它一给，<code>win_min_us</code> / <code>win_max_us</code> / <code>win_num</code> / <code>win_log</code> 四项全部被忽略）。详见手册 <a href="令牌桶与滑窗统计.html#8-3">§8.3</a>。</p>
+</div>
+
+<h2 id="8">8. 速查</h2>
+
+<table>
+<tr><th>概念</th><th>一句话</th><th>代码位置</th></tr>
+<tr><td><code>(t−W, t]</code></td><td>半开区间，恰落在左端点的包算滑出，故弹出条件用 <code>&lt;=</code></td><td><code>sliding_window::add()</code></td></tr>
+<tr><td>峰值位置</td><td>必落在某个到达时刻，连续无穷多个窗口位置被压缩成有限次 <code>add()</code></td><td>同上，<a href="#2">§2</a></td></tr>
+<tr><td>增量维护</td><td>只左弹右压，<code>sum</code> 从不重算，每包一生各入出队一次，O(1) 均摊</td><td>同上</td></tr>
+<tr><td><code>peak_depth</code></td><td>取到峰值时窗口内的包数；<code>≤ 1</code> 说明这档测的是总线粒度，不能进拟合</td><td><code>fit_line()</code></td></tr>
+<tr><td><code>span</code></td><td>首末包的时间跨度；<code>W &gt; span</code> 的档峰值已饱和，不能进拟合</td><td><code>fit_line()</code></td></tr>
+<tr><td><code>fit_R</code></td><td>拟合斜率 → 速率 <code>R</code>，由<strong>宽端</strong>的点支撑</td><td><code>fit_line()</code></td></tr>
+<tr><td><code>fit_B</code></td><td>拟合截距 → 桶深 <code>B</code>，外推回 <code>W = 0</code>，由<strong>窄端</strong>的点支撑</td><td><code>fit_line()</code></td></tr>
+<tr><td><code>win_log = 1</code></td><td>等比分段（默认）。区间跨量级时唯一可用的排布</td><td><a href="#7">§7</a></td></tr>
+<tr><td><code>fit_n = 0</code></td><td>过滤后不足两点，放弃拟合。先查仿真长度与档位设置</td><td><code>fit_line()</code></td></tr>
+</table>
+
+<div class="good">
+<p><strong>误差方向是单向的。</strong>峰值只增不减 ⟹ 仿真不够长时 <code>peak</code> 偏小 ⟹ 拟合出的 <code>R</code> / <code>B</code> 偏小。报告里 <code>fit_R</code> 略低于配置值是正常的收敛不足；若<strong>高于</strong>配置值，那才是真问题。</p>
+</div>
+
+<footer>
+所有演示均为纯前端模拟，算法与 <code>env/buck_win_stats.sv</code> 中的 <code>sliding_window::add()</code> 与 <code>fit_line()</code> 一致。
+令牌桶侧的动画见 <a href="token_bucket_anim.html">token_bucket_anim.html</a>，完整文档见 <a href="令牌桶与滑窗统计.html">令牌桶与滑窗统计.html</a>。
+</footer>
+
+</div><!-- /wrap -->
+
+<script>
+/* ============ 公共工具 ============ */
+const DPR = Math.min(window.devicePixelRatio || 1, 2);
+function CW(cv){ return Math.max(320, cv.clientWidth || 600); }
+function fitCanvas(cv, h){
+  const w = CW(cv);
+  cv.width = w * DPR; cv.height = h * DPR;
+  cv.style.height = h + 'px';
+  const c = cv.getContext('2d');
+  c.setTransform(DPR,0,0,DPR,0,0);
+  return c;
+}
+function css(n){ return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
+function rrect(c,x,y,w,h,r){
+  r = Math.max(0, Math.min(r, w/2, h/2));
+  c.beginPath();
+  c.moveTo(x+r,y); c.arcTo(x+w,y,x+w,y+h,r); c.arcTo(x+w,y+h,x,y+h,r);
+  c.arcTo(x,y+h,x,y,r); c.arcTo(x,y,x+w,y,r); c.closePath();
+}
+function fmt(v,d){ return Number(v).toFixed(d===undefined?1:d); }
+function logLine(box, html, cls){
+  const d = document.createElement('div');
+  if (cls) d.className = cls;
+  d.innerHTML = html;
+  box.appendChild(d);
+  box.scrollTop = box.scrollHeight;
+  while (box.childElementCount > 220) box.removeChild(box.firstChild);
+}
+function setRo(el, v, state){
+  el.querySelector('.v').textContent = v;
+  el.classList.remove('ok','bad');
+  if (state) el.classList.add(state);
+}
+function hline(c, x0, x1, y, color, dash){
+  c.save(); c.strokeStyle = color; c.lineWidth = 1;
+  if (dash) c.setLineDash(dash);
+  c.beginPath(); c.moveTo(x0, y+.5); c.lineTo(x1, y+.5); c.stroke();
+  c.restore();
+}
+function label(c, txt, x, y, color, align, size){
+  c.save();
+  c.fillStyle = color || css('--muted');
+  c.font = (size || 11) + 'px ui-monospace,Consolas,monospace';
+  c.textAlign = align || 'left'; c.textBaseline = 'middle';
+  c.fillText(txt, x, y);
+  c.restore();
+}
+function lcg(seed){
+  let s = seed >>> 0;
+  return function(){ s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+}
+
+/* ============ 滑动窗口模型（算法与 sliding_window 逐行一致） ============ */
+/* 单位: 时间 us, 字节 byte */
+class SlidingWindow {
+  constructor(w){
+    this.W = w;
+    this.tq = []; this.bq = [];
+    this.sum = 0;
+    this.peak = 0; this.peakEnd = 0; this.peakDepth = 0; this.maxDepth = 0;
+    this.popped = [];        // 本次 add 弹出了哪些事件, 仅供动画展示
+  }
+  /* add(): 对应 sliding_window::add() */
+  add(t, nbytes){
+    const lo = t - this.W;
+    this.popped = [];
+    this.tq.push(t); this.bq.push(nbytes);
+    this.sum += nbytes;
+    // 弹出滑出左边界的事件; 半开区间故用 <=
+    while (this.tq.length > 0 && this.tq[0] <= lo + 1e-9){
+      this.sum -= this.bq[0];
+      this.popped.push({t:this.tq.shift(), b:this.bq.shift()});
+    }
+    let hit = false;
+    if (this.sum > this.peak){
+      this.peak = this.sum; this.peakEnd = t; this.peakDepth = this.tq.length;
+      hit = true;
+    }
+    if (this.tq.length > this.maxDepth) this.maxDepth = this.tq.length;
+    return {sum:this.sum, lo:lo, hit:hit, depth:this.tq.length};
+  }
+  peakBps(){ return this.W <= 0 ? 0 : this.peak / this.W; }   // byte/us = MB/s
+}
+
+/* ============ 最小二乘（对应 fit_line()） ============ */
+function lsq(pts){
+  let sx=0, sy=0, sxx=0, sxy=0;
+  const n = pts.length;
+  if (n < 2) return null;
+  for (const p of pts){ sx+=p.x; sy+=p.y; sxx+=p.x*p.x; sxy+=p.x*p.y; }
+  const den = n*sxx - sx*sx;
+  if (den === 0) return null;
+  const R = (n*sxy - sx*sy) / den;
+  return {R:R, B:(sy - R*sx)/n, n:n};
+}
+
+/* ============ 整形后的包流（令牌桶放行序列） ============ */
+/* 返回 [{t, len}]，t 为包末 beat 时刻(us)，算法同 token_bucket.sv 的 TAT 推进 */
+function genStream(opt){
+  const R = opt.R, B = opt.B, len = opt.len, iv = opt.iv;
+  const n = opt.n, seed = opt.seed === undefined ? 7 : opt.seed;
+  const rnd = lcg(seed);
+  const out = [];
+  let tat = 0, t = 0;
+  for (let i = 0; i < n; i++){
+    const L = opt.jitter ? Math.max(16, Math.round(len * (0.6 + 0.8*rnd()))) : len;
+    const earliest = tat - (B - L) / R;
+    const start = Math.max(earliest, t);
+    tat = Math.max(start, tat) + L / R;
+    out.push({t:start, len:L});
+    t = start + (opt.jitter ? iv * (0.5 + rnd()) : iv);
+  }
+  return out;
+}
+
+/* ============ 演示 1: 窗口滑动 ============ */
+(function(){
+  const cv = document.getElementById('d1-cv');
+  const btn = document.getElementById('d1-run');
+  const sW = document.getElementById('d1-w'), sI = document.getElementById('d1-iv');
+  const log = document.getElementById('d1-log');
+  const roSum = document.getElementById('d1-ro-sum'), roDep = document.getElementById('d1-ro-dep');
+  const roPk = document.getElementById('d1-ro-pk'), roPd = document.getElementById('d1-ro-pd');
+  const roQ = document.getElementById('d1-ro-q');
+  let st, raf = 0, running = false, prevReal = 0, acc = 0;
+
+  const SPAN = 700;              // 画布横轴跨度 us
+  function syncLab(){
+    document.getElementById('d1-wv').textContent = sW.value + ' us';
+    document.getElementById('d1-ivv').textContent = sI.value + ' us';
+  }
+  function reset(){
+    const iv = +sI.value;
+    st = {
+      win: new SlidingWindow(+sW.value),
+      pkts: [], next: 0, t: 0, iv: iv,
+      rnd: lcg(11), lastLo: -1, flash: 0
+    };
+    log.innerHTML = '';
+    acc = 0;
+    paint(); readout();
+  }
+  function stepOne(){
+    const len = Math.round(64 * Math.round(1 + st.rnd() * 3));   // 64/128/192/256
+    const t = st.next;
+    const r = st.win.add(t, len);
+    st.pkts.push({t:t, len:len});
+    st.t = t;
+    st.lastLo = r.lo;
+    st.next = t + st.iv * (0.6 + 0.8 * st.rnd());
+    let s = 'add(t=' + fmt(t,0) + 'us, ' + len + 'B)  ->  sum=' + fmt(r.sum,0) + 'B depth=' + r.depth;
+    if (st.win.popped.length){
+      s += '\n   弹出 ' + st.win.popped.length + ' 个: ' +
+           st.win.popped.map(p=>'t='+fmt(p.t,0)+'/'+p.b+'B').join(', ') +
+           '  (<= lo=' + fmt(r.lo,0) + ')';
+    }
+    if (r.hit){ s += '\n   ** peak 刷新 = ' + fmt(st.win.peak,0) + 'B, depth=' + r.depth; st.flash = 1; }
+    logLine(log, s, r.hit ? 'hl' : null);
+    // 画布只保留最近 SPAN 内的包
+    while (st.pkts.length && st.pkts[0].t < st.t - SPAN) st.pkts.shift();
+    readout(); paint();
+  }
+  function readout(){
+    const w = st.win;
+    setRo(roSum, fmt(w.sum,0) + ' B');
+    setRo(roDep, w.tq.length);
+    setRo(roPk, fmt(w.peak,0) + ' B', 'bad');
+    setRo(roPd, w.peakDepth, w.peakDepth <= 1 ? 'bad' : 'ok');
+    setRo(roQ, w.tq.length);
+  }
+  function paint(){
+    const H = 260, c = fitCanvas(cv, H), W = CW(cv);
+    const L = 48, Rr = W - 16, axY = 170, barMax = 96;
+    c.clearRect(0,0,W,H);
+    const t1 = Math.max(st.t, SPAN * 0.45);
+    const t0 = t1 - SPAN;
+    const X = t => L + (t - t0) / SPAN * (Rr - L);
+
+    // 窗口带
+    if (st.pkts.length){
+      const lo = Math.max(t0, st.t - st.win.W);
+      const x0 = X(lo), x1 = X(st.t);
+      c.fillStyle = 'rgba(130,80,223,.12)';
+      c.fillRect(x0, 40, x1 - x0, axY - 40);
+      c.strokeStyle = css('--win'); c.lineWidth = 1.5;
+      c.setLineDash([4,3]);
+      c.beginPath(); c.moveTo(x0+.5, 40); c.lineTo(x0+.5, axY); c.stroke();
+      c.setLineDash([]);
+      c.beginPath(); c.moveTo(x1+.5, 40); c.lineTo(x1+.5, axY); c.stroke();
+      label(c, 't−W', x0, 32, css('--win'), 'center');
+      label(c, 't', x1, 32, css('--win'), 'center');
+      label(c, 'W = ' + fmt(st.win.W,0) + 'us', (x0+x1)/2, 52, css('--win'), 'center', 12);
+    }
+
+    // 时间轴
+    hline(c, L, Rr, axY, css('--line'));
+    for (let k = 0; k <= 7; k++){
+      const tt = t0 + SPAN * k / 7;
+      const x = X(tt);
+      hline(c, x, x, axY, css('--line'));
+      c.fillStyle = css('--line'); c.fillRect(x, axY, 1, 4);
+      label(c, fmt(tt,0), x, axY + 14, css('--muted'), 'center');
+    }
+    label(c, 'us', Rr, axY + 14, css('--muted'), 'right');
+
+    // 包竖条
+    const lo = st.t - st.win.W;
+    const maxLen = 256;
+    for (const p of st.pkts){
+      const x = X(p.t);
+      if (x < L - 2) continue;
+      const h = p.len / maxLen * barMax;
+      const inWin = p.t > lo + 1e-9 && p.t <= st.t + 1e-9;
+      c.fillStyle = inWin ? css('--pkt') : '#d1d9e0';
+      rrect(c, x - 3.5, axY - h, 7, h, 2); c.fill();
+      if (inWin && st.pkts.length < 26)
+        label(c, p.len, x, axY - h - 8, css('--pkt'), 'center', 10);
+    }
+
+    // sum 条
+    const sTop = axY + 34;
+    label(c, 'sum', L - 8, sTop + 11, css('--muted'), 'right');
+    const barW = Math.max(0, (st.win.sum / 1400) * (Rr - L));
+    c.fillStyle = css('--code-bg'); rrect(c, L, sTop, Rr - L, 22, 4); c.fill();
+    c.fillStyle = st.flash > 0 ? css('--peak') : css('--pkt');
+    rrect(c, L, sTop, Math.min(barW, Rr - L), 22, 4); c.fill();
+    label(c, fmt(st.win.sum,0) + ' B', L + 8, sTop + 11, '#fff', 'left', 12);
+    // 峰值刻度
+    const pkX = L + (st.win.peak / 1400) * (Rr - L);
+    c.strokeStyle = css('--peak'); c.lineWidth = 2;
+    c.beginPath(); c.moveTo(pkX, sTop - 4); c.lineTo(pkX, sTop + 26); c.stroke();
+    label(c, 'peak ' + fmt(st.win.peak,0), Math.min(pkX + 6, Rr - 70), sTop + 36, css('--peak'), 'left', 11);
+    if (st.flash > 0) st.flash = Math.max(0, st.flash - .08);
+  }
+  function stop(){ running = false; btn.textContent = '▶ 开始'; cancelAnimationFrame(raf); }
+  function loop(ts){
+    if (!prevReal) prevReal = ts;
+    const dt = Math.min(60, ts - prevReal); prevReal = ts;
+    acc += dt;
+    if (acc > 420){ acc = 0; stepOne(); }
+    else paint();
+    raf = requestAnimationFrame(loop);
+  }
+  btn.addEventListener('click', ()=>{
+    if (running){ stop(); return; }
+    running = true; btn.textContent = '⏸ 暂停'; prevReal = 0;
+    raf = requestAnimationFrame(loop);
+  });
+  document.getElementById('d1-step').addEventListener('click', ()=>{ stop(); stepOne(); });
+  document.getElementById('d1-reset').addEventListener('click', ()=>{ stop(); syncLab(); reset(); });
+  [sW, sI].forEach(s=> s.addEventListener('input', ()=>{ syncLab(); stop(); reset(); }));
+  window.addEventListener('resize', ()=> paint());
+  syncLab(); reset();
+})();
+
+/* ============ 演示 2: 连续平移 vs 离散到达时刻 ============ */
+(function(){
+  const cv = document.getElementById('d2-cv');
+  const btn = document.getElementById('d2-run');
+  const sW = document.getElementById('d2-w');
+  const roSum = document.getElementById('d2-ro-sum'), roMax = document.getElementById('d2-ro-max');
+  const roDis = document.getElementById('d2-ro-dis'), roEq = document.getElementById('d2-ro-eq');
+  let st, raf = 0, running = false, prevReal = 0;
+
+  const SPAN = 620;
+  const PKTS = [{t:40,len:128},{t:72,len:256},{t:96,len:128},{t:150,len:192},
+                {t:168,len:256},{t:184,len:128},{t:260,len:192},{t:300,len:128},
+                {t:318,len:256},{t:336,len:192},{t:420,len:128},{t:470,len:256},
+                {t:486,len:192},{t:540,len:128},{t:566,len:256}];
+
+  function syncLab(){ document.getElementById('d2-wv').textContent = sW.value + ' us'; }
+  function bytesIn(right, W){            // 窗口 (right-W, right] 内字节
+    let s = 0;
+    for (const p of PKTS) if (p.t > right - W + 1e-9 && p.t <= right + 1e-9) s += p.len;
+    return s;
+  }
+  function reset(){
+    const W = +sW.value;
+    // 扫描曲线
+    const curve = [];
+    const N = 900;
+    let mx = 0;
+    for (let i = 0; i <= N; i++){
+      const r = W + (SPAN - W) * i / N;
+      const v = bytesIn(r, W);
+      if (v > mx) mx = v;
+      curve.push({r:r, v:v});
+    }
+    // 只查到达时刻
+    let dis = 0;
+    for (const p of PKTS){ const v = bytesIn(p.t, W); if (v > dis) dis = v; }
+    st = {W:W, curve:curve, mx:mx, dis:dis, i:0};
+    readout(); paint();
+  }
+  function readout(){
+    const cur = st.curve[st.i];
+    setRo(roSum, fmt(cur.v,0) + ' B');
+    setRo(roMax, fmt(st.mx,0) + ' B');
+    setRo(roDis, fmt(st.dis,0) + ' B');
+    const eq = Math.abs(st.mx - st.dis) < 1e-6;
+    setRo(roEq, eq ? '相等 ✓' : '不等 ✗', eq ? 'ok' : 'bad');
+  }
+  function paint(){
+    const H = 280, c = fitCanvas(cv, H), W = CW(cv);
+    const L = 48, Rr = W - 16, axY = 132, barMax = 76;
+    const cTop = 176, cBot = 254;
+    c.clearRect(0,0,W,H);
+    const X = t => L + t / SPAN * (Rr - L);
+    const cur = st.curve[st.i];
+
+    // 窗口带
+    const x0 = X(cur.r - st.W), x1 = X(cur.r);
+    c.fillStyle = 'rgba(130,80,223,.12)';
+    c.fillRect(x0, 34, x1 - x0, axY - 34);
+    c.strokeStyle = css('--win'); c.lineWidth = 1.5;
+    c.beginPath(); c.moveTo(x0+.5,34); c.lineTo(x0+.5,axY); c.stroke();
+    c.beginPath(); c.moveTo(x1+.5,34); c.lineTo(x1+.5,axY); c.stroke();
+    label(c, 'W = ' + fmt(st.W,0) + 'us', (x0+x1)/2, 26, css('--win'), 'center', 12);
+
+    // 轴与包
+    hline(c, L, Rr, axY, css('--line'));
+    const onArrival = PKTS.some(p=> Math.abs(p.t - cur.r) < SPAN/900*1.2);
+    for (const p of PKTS){
+      const x = X(p.t), h = p.len / 256 * barMax;
+      const inWin = p.t > cur.r - st.W + 1e-9 && p.t <= cur.r + 1e-9;
+      c.fillStyle = inWin ? css('--pkt') : '#d1d9e0';
+      rrect(c, x - 3.5, axY - h, 7, h, 2); c.fill();
+      // 到达时刻标尺
+      c.fillStyle = '#d1d9e0'; c.fillRect(x, axY, 1, 4);
+    }
+    if (onArrival){
+      c.strokeStyle = css('--peak'); c.lineWidth = 2;
+      c.beginPath(); c.moveTo(x1+.5, 34); c.lineTo(x1+.5, axY + 6); c.stroke();
+    }
+
+    // 曲线
+    const vmax = Math.max(st.mx, 1) * 1.15;
+    const Y = v => cBot - v / vmax * (cBot - cTop);
+    hline(c, L, Rr, cBot, css('--line'));
+    hline(c, L, Rr, Y(st.mx), css('--peak'), [5,4]);
+    label(c, 'max ' + fmt(st.mx,0) + 'B', Rr, Y(st.mx) - 9, css('--peak'), 'right');
+    label(c, '窗口内字节', L - 8, cTop, css('--muted'), 'right');
+    c.strokeStyle = css('--win'); c.lineWidth = 1.8;
+    c.beginPath();
+    st.curve.forEach((p,i)=>{
+      const x = X(p.r), y = Y(p.v);
+      if (i === 0) c.moveTo(x,y); else { c.lineTo(x, Y(st.curve[i-1].v)); c.lineTo(x,y); }
+    });
+    c.stroke();
+    // 当前点
+    c.fillStyle = cur.v >= st.mx - 1e-6 ? css('--peak') : css('--win');
+    c.beginPath(); c.arc(X(cur.r), Y(cur.v), 4.5, 0, 7); c.fill();
+    label(c, '窗口右端点位置 →', (L+Rr)/2, cBot + 16, css('--muted'), 'center');
+  }
+  function stop(){ running = false; btn.textContent = '▶ 连续平移窗口'; cancelAnimationFrame(raf); }
+  function loop(ts){
+    if (!prevReal) prevReal = ts;
+    const dt = Math.min(60, ts - prevReal); prevReal = ts;
+    st.i += Math.max(1, Math.round(dt / 8));
+    if (st.i >= st.curve.length){ st.i = st.curve.length - 1; readout(); paint(); stop(); return; }
+    readout(); paint();
+    raf = requestAnimationFrame(loop);
+  }
+  btn.addEventListener('click', ()=>{
+    if (running){ stop(); return; }
+    if (st.i >= st.curve.length - 1) st.i = 0;
+    running = true; btn.textContent = '⏸ 暂停'; prevReal = 0;
+    raf = requestAnimationFrame(loop);
+  });
+  document.getElementById('d2-reset').addEventListener('click', ()=>{ stop(); reset(); });
+  sW.addEventListener('input', ()=>{ syncLab(); stop(); reset(); });
+  window.addEventListener('resize', ()=> paint());
+  syncLab(); reset();
+})();
+
+/* ============ 演示 3: 平均 vs 滑窗峰值 ============ */
+(function(){
+  const cv = document.getElementById('d3-cv');
+  const btn = document.getElementById('d3-run');
+  const sB = document.getElementById('d3-burst'), sW = document.getElementById('d3-w');
+  const roAvg = document.getElementById('d3-ro-avg'), roPk = document.getElementById('d3-ro-pk');
+  const roRatio = document.getElementById('d3-ro-ratio'), roPos = document.getElementById('d3-ro-pos');
+  let st, raf = 0, running = false, prevReal = 0;
+
+  const SPAN = 900, RATE = 6;      // 稳态 6 B/us
+  function syncLab(){
+    document.getElementById('d3-bv').textContent = sB.value + ' B';
+    document.getElementById('d3-wv').textContent = sW.value + ' us';
+  }
+  function build(){
+    // 开场一段突发(信用攒满), 之后被整形到 RATE
+    const burst = +sB.value;
+    const pkts = [];
+    const rnd = lcg(5);
+    let t = 20, credit = burst;
+    while (t < SPAN){
+      const len = 128;
+      if (credit >= len){ credit -= len; pkts.push({t:t, len:len}); t += 6; }
+      else { pkts.push({t:t, len:len}); t += len / RATE * (0.9 + 0.2*rnd()); }
+    }
+    return pkts;
+  }
+  function reset(){
+    const pkts = build(), W = +sW.value;
+    st = {pkts:pkts, W:W, i:0, win:new SlidingWindow(W), total:0, first:-1, last:0};
+    readout(); paint();
+  }
+  function feed(n){
+    for (let k = 0; k < n && st.i < st.pkts.length; k++){
+      const p = st.pkts[st.i++];
+      st.win.add(p.t, p.len);
+      st.total += p.len;
+      if (st.first < 0) st.first = p.t;
+      st.last = p.t;
+    }
+  }
+  function readout(){
+    const span = st.last - st.first;
+    const avg = span > 0 ? st.total / span : 0;
+    const pk = st.win.peakBps();
+    setRo(roAvg, fmt(avg,2) + ' B/us');
+    setRo(roPk, fmt(pk,2) + ' B/us', 'bad');
+    setRo(roRatio, avg > 0 ? fmt(pk/avg,2) + ' ×' : '—');
+    setRo(roPos, st.win.peak > 0 ? fmt(st.win.peakEnd,0) + ' us' : '—');
+  }
+  function paint(){
+    const H = 250, c = fitCanvas(cv, H), W = CW(cv);
+    const L = 52, Rr = W - 16, axY = 150, barMax = 84;
+    c.clearRect(0,0,W,H);
+    const X = t => L + t / SPAN * (Rr - L);
+
+    // 峰值窗口高亮
+    if (st.win.peak > 0){
+      const x0 = X(Math.max(0, st.win.peakEnd - st.W)), x1 = X(st.win.peakEnd);
+      c.fillStyle = 'rgba(130,80,223,.14)';
+      c.fillRect(x0, 36, x1 - x0, axY - 36);
+      c.strokeStyle = css('--win'); c.lineWidth = 1.5;
+      c.beginPath(); c.moveTo(x0+.5,36); c.lineTo(x0+.5,axY); c.stroke();
+      c.beginPath(); c.moveTo(x1+.5,36); c.lineTo(x1+.5,axY); c.stroke();
+      label(c, 'peak 窗口 ' + fmt(st.win.peak,0) + 'B / ' + fmt(st.W,0) + 'us',
+            (x0+x1)/2, 28, css('--win'), 'center', 12);
+    }
+    hline(c, L, Rr, axY, css('--line'));
+    for (let k = 0; k <= 6; k++){
+      const x = X(SPAN*k/6);
+      c.fillStyle = css('--line'); c.fillRect(x, axY, 1, 4);
+      label(c, fmt(SPAN*k/6,0), x, axY+14, css('--muted'), 'center');
+    }
+    label(c, 'us', Rr, axY+14, css('--muted'), 'right');
+
+    for (let j = 0; j < st.i; j++){
+      const p = st.pkts[j], x = X(p.t);
+      const inPk = st.win.peak > 0 && p.t > st.win.peakEnd - st.W + 1e-9 && p.t <= st.win.peakEnd + 1e-9;
+      c.fillStyle = inPk ? css('--win') : css('--pkt');
+      c.globalAlpha = inPk ? 1 : .55;
+      c.fillRect(x - 1.5, axY - p.len/256*barMax, 3, p.len/256*barMax);
+      c.globalAlpha = 1;
+    }
+
+    // 两条速率条
+    const span = st.last - st.first;
+    const avg = span > 0 ? st.total / span : 0;
+    const pk = st.win.peakBps();
+    const vmax = Math.max(pk, avg, 1) * 1.1;
+    const bars = [{k:'全程平均', v:avg, col:css('--muted')},
+                  {k:'滑窗峰值', v:pk,  col:css('--peak')}];
+    bars.forEach((b,i)=>{
+      const y = axY + 36 + i*26;
+      label(c, b.k, L - 8, y + 9, css('--muted'), 'right');
+      c.fillStyle = css('--code-bg'); rrect(c, L, y, Rr-L, 18, 4); c.fill();
+      c.fillStyle = b.col; rrect(c, L, y, Math.max(2,(b.v/vmax)*(Rr-L)), 18, 4); c.fill();
+      label(c, fmt(b.v,2) + ' B/us', L + 8, y + 9, '#fff', 'left', 11);
+    });
+  }
+  function stop(){ running = false; btn.textContent = '▶ 开始'; cancelAnimationFrame(raf); }
+  function loop(ts){
+    if (!prevReal) prevReal = ts;
+    const dt = Math.min(60, ts - prevReal); prevReal = ts;
+    feed(Math.max(1, Math.round(dt/14)));
+    readout(); paint();
+    if (st.i >= st.pkts.length){ stop(); return; }
+    raf = requestAnimationFrame(loop);
+  }
+  btn.addEventListener('click', ()=>{
+    if (running){ stop(); return; }
+    if (st.i >= st.pkts.length) reset();
+    running = true; btn.textContent = '⏸ 暂停'; prevReal = 0;
+    raf = requestAnimationFrame(loop);
+  });
+  document.getElementById('d3-reset').addEventListener('click', ()=>{ stop(); reset(); });
+  [sB, sW].forEach(s=> s.addEventListener('input', ()=>{ syncLab(); stop(); reset(); }));
+  window.addEventListener('resize', ()=> paint());
+  syncLab(); reset();
+})();
+
+/* ============ 演示 4: 多档窗口并行 ============ */
+(function(){
+  const cv = document.getElementById('d4-cv');
+  const btn = document.getElementById('d4-run');
+  const sR = document.getElementById('d4-r'), sB = document.getElementById('d4-b');
+  const log = document.getElementById('d4-log');
+  const roT = document.getElementById('d4-ro-t'), roN = document.getElementById('d4-ro-n');
+  const roS = document.getElementById('d4-ro-span');
+  let st, raf = 0, running = false, prevReal = 0, acc = 0;
+
+  const WS = [25, 60, 145, 350, 850];     // 等比 5 档
+  function syncLab(){
+    document.getElementById('d4-rv').textContent = sR.value + ' B/us';
+    document.getElementById('d4-bv').textContent = sB.value + ' B';
+  }
+  function reset(){
+    const R = +sR.value, B = +sB.value;
+    st = {
+      wins: WS.map(w=> new SlidingWindow(w)),
+      pkts: genStream({R:R, B:B, len:128, iv:9, n:400, jitter:true, seed:3}),
+      i: 0, first:-1, last:0, R:R, B:B
+    };
+    log.innerHTML = '';
+    acc = 0;
+    readout(); paint();
+  }
+  function stepOne(){
+    if (st.i >= st.pkts.length) return;
+    const p = st.pkts[st.i++];
+    const hits = [];
+    st.wins.forEach((w,k)=>{ if (w.add(p.t, p.len).hit) hits.push(k); });
+    if (st.first < 0) st.first = p.t;
+    st.last = p.t;
+    if (hits.length)
+      logLine(log, 't=' + fmt(p.t,0) + 'us ' + p.len + 'B  刷新峰值: ' +
+                   hits.map(k=> 'W=' + WS[k] + 'us→' + fmt(st.wins[k].peak,0) + 'B').join('  '), 'hl');
+    readout(); paint();
+  }
+  function readout(){
+    setRo(roT, fmt(st.last,0) + ' us');
+    setRo(roN, st.i);
+    setRo(roS, fmt(Math.max(0, st.last - Math.max(0,st.first)),0) + ' us');
+  }
+  function paint(){
+    const H = 40 + WS.length*38, c = fitCanvas(cv, H), W = CW(cv);
+    const L = 76, Rr = W - 96;
+    c.clearRect(0,0,W,H);
+    const vmax = Math.max(...st.wins.map(w=> w.peak), 1) * 1.08;
+    st.wins.forEach((w,k)=>{
+      const y = 18 + k*38;
+      label(c, 'W=' + WS[k] + 'us', L - 8, y + 11, css('--fg'), 'right', 12);
+      c.fillStyle = css('--code-bg'); rrect(c, L, y, Rr-L, 22, 4); c.fill();
+      // 峰值底色
+      c.fillStyle = 'rgba(207,34,46,.18)';
+      rrect(c, L, y, Math.max(2,(w.peak/vmax)*(Rr-L)), 22, 4); c.fill();
+      // 当前 sum
+      c.fillStyle = css('--pkt');
+      rrect(c, L, y, Math.max(2,(w.sum/vmax)*(Rr-L)), 22, 4); c.fill();
+      // 峰值刻度线
+      const px = L + (w.peak/vmax)*(Rr-L);
+      c.strokeStyle = css('--peak'); c.lineWidth = 2;
+      c.beginPath(); c.moveTo(px, y-3); c.lineTo(px, y+25); c.stroke();
+      label(c, fmt(w.peak,0) + 'B', Rr + 8, y + 11, css('--peak'), 'left', 12);
+      label(c, 'd=' + w.peakDepth, L + 6, y + 11,
+            w.peakDepth <= 1 ? css('--peak') : '#fff', 'left', 11);
+    });
+  }
+  function stop(){ running = false; btn.textContent = '▶ 开始'; cancelAnimationFrame(raf); }
+  function loop(ts){
+    if (!prevReal) prevReal = ts;
+    const dt = Math.min(60, ts - prevReal); prevReal = ts;
+    acc += dt;
+    if (acc > 55){ acc = 0; stepOne(); }
+    if (st.i >= st.pkts.length){ stop(); return; }
+    raf = requestAnimationFrame(loop);
+  }
+  btn.addEventListener('click', ()=>{
+    if (running){ stop(); return; }
+    if (st.i >= st.pkts.length) reset();
+    running = true; btn.textContent = '⏸ 暂停'; prevReal = 0;
+    raf = requestAnimationFrame(loop);
+  });
+  document.getElementById('d4-step').addEventListener('click', ()=>{ stop(); stepOne(); });
+  document.getElementById('d4-reset').addEventListener('click', ()=>{ stop(); reset(); });
+  [sR, sB].forEach(s=> s.addEventListener('input', ()=>{ syncLab(); stop(); reset(); }));
+  window.addEventListener('resize', ()=> paint());
+  syncLab(); reset();
+})();
+
+/* ============ 档位工具（对应 build_windows() 与 fit_line() 的过滤） ============ */
+function geoBands(lo, hi, n){
+  const out = [], k = Math.pow(hi/lo, 1/(n-1));
+  for (let i = 0; i < n; i++) out.push(lo * Math.pow(k, i));
+  return out;
+}
+function linBands(lo, hi, n){
+  const out = [], s = (hi-lo)/(n-1);
+  for (let i = 0; i < n; i++) out.push(lo + s*i);
+  return out;
+}
+function runBands(widths, pkts, upto){
+  const wins = widths.map(w=> new SlidingWindow(w));
+  const m = upto === undefined ? pkts.length : upto;
+  for (let i = 0; i < m; i++){
+    const p = pkts[i];
+    for (const w of wins) w.add(p.t, p.len);
+  }
+  const span = m > 1 ? pkts[m-1].t - pkts[0].t : 0;
+  return {wins:wins, span:span, n:m};
+}
+/* 两道过滤: peak_depth <= 1 / W > span */
+function sieve(wins, span, f1, f2){
+  const sel = [], rej = [];
+  for (const w of wins){
+    const bad = (f1 && w.peakDepth <= 1) || (f2 && w.W > span);
+    (bad ? rej : sel).push(w);
+  }
+  return {sel:sel, rej:rej};
+}
+function fitOf(sel){ return lsq(sel.map(w=> ({x:w.W, y:w.peak}))); }
+function errPct(got, want){ return want === 0 ? 0 : (got - want) / want * 100; }
+function sgn(v, d){ return (v >= 0 ? '+' : '') + fmt(v, d === undefined ? 2 : d); }
+
+/* ============ 演示 5: peak(W) 散点与拟合线 ============ */
+(function(){
+  const cv = document.getElementById('d5-cv');
+  const btn = document.getElementById('d5-run');
+  const sR = document.getElementById('d5-r'), sB = document.getElementById('d5-b');
+  const roN = document.getElementById('d5-ro-n');
+  const roFR = document.getElementById('d5-ro-fr'), roER = document.getElementById('d5-ro-er');
+  const roFB = document.getElementById('d5-ro-fb'), roEB = document.getElementById('d5-ro-eb');
+  let st, raf = 0, running = false, prevReal = 0, acc = 0;
+
+  const WS = [15, 40, 100, 260, 650, 1600];
+  function syncLab(){
+    document.getElementById('d5-rv').textContent = sR.value + ' B/us';
+    document.getElementById('d5-bv').textContent = sB.value + ' B';
+  }
+  function reset(){
+    const R = +sR.value, B = +sB.value;
+    st = {
+      R:R, B:B,
+      wins: WS.map(w=> new SlidingWindow(w)),
+      pkts: genStream({R:R, B:B, len:128, iv:9, n:420, jitter:true, seed:11}),
+      i:0, first:-1, last:0, fit:null
+    };
+    acc = 0;
+    readout(); paint();
+  }
+  function stepOne(){
+    if (st.i >= st.pkts.length) return;
+    const p = st.pkts[st.i++];
+    for (const w of st.wins) w.add(p.t, p.len);
+    if (st.first < 0) st.first = p.t;
+    st.last = p.t;
+    const span = st.last - st.first;
+    st.fit = fitOf(sieve(st.wins, span, true, true).sel);
+  }
+  function readout(){
+    setRo(roN, st.i);
+    if (!st.fit){
+      setRo(roFR, '–'); setRo(roER, '–'); setRo(roFB, '–'); setRo(roEB, '–');
+      return;
+    }
+    const eR = errPct(st.fit.R, st.R), eB = errPct(st.fit.B, st.B);
+    setRo(roFR, fmt(st.fit.R,2) + ' B/us');
+    setRo(roER, sgn(eR) + ' %', Math.abs(eR) < 5 ? 'ok' : 'bad');
+    setRo(roFB, fmt(st.fit.B,0) + ' B');
+    setRo(roEB, sgn(eB) + ' %', Math.abs(eB) < 12 ? 'ok' : 'bad');
+  }
+  function paint(){
+    const H = 260, c = fitCanvas(cv, H), W = CW(cv);
+    const L = 62, Rr = W - 16, T = 14, Bt = H - 28;
+    c.clearRect(0,0,W,H);
+    const wmax = WS[WS.length-1] * 1.12;
+    const ymax = Math.max(st.R*wmax + st.B, 1) * 1.05;
+    const X = w => L + (w/wmax)*(Rr-L);
+    const Y = y => Bt - (y/ymax)*(Bt-T);
+    // 坐标轴
+    c.strokeStyle = css('--line'); c.lineWidth = 1;
+    c.beginPath(); c.moveTo(L+.5,T); c.lineTo(L+.5,Bt+.5); c.lineTo(Rr,Bt+.5); c.stroke();
+    label(c, 'peak (B)', L - 8, T + 6, css('--muted'), 'right');
+    label(c, 'W (us)', Rr, Bt + 16, css('--muted'), 'right');
+    for (const w of WS) label(c, fmt(w,0), X(w), Bt + 16, css('--muted'), 'center', 10);
+    // 理论线
+    c.strokeStyle = '#8c959f'; c.lineWidth = 2; c.setLineDash([5,4]);
+    c.beginPath(); c.moveTo(X(0), Y(st.B)); c.lineTo(X(wmax), Y(st.R*wmax + st.B)); c.stroke();
+    c.setLineDash([]);
+    label(c, 'R·W+B', X(wmax) - 6, Y(st.R*wmax + st.B) - 12, '#8c959f', 'right', 11);
+    // 拟合线
+    if (st.fit){
+      c.strokeStyle = css('--peak'); c.lineWidth = 2;
+      c.beginPath(); c.moveTo(X(0), Y(st.fit.B)); c.lineTo(X(wmax), Y(st.fit.R*wmax + st.fit.B)); c.stroke();
+      // 截距标记
+      c.fillStyle = css('--peak');
+      c.beginPath(); c.arc(X(0), Y(st.fit.B), 3.5, 0, 7); c.fill();
+      label(c, 'fit_B=' + fmt(st.fit.B,0), X(0) + 6, Y(st.fit.B) - 11, css('--peak'), 'left', 11);
+    }
+    // 实测点
+    const span = Math.max(0, st.last - Math.max(0,st.first));
+    for (const w of st.wins){
+      const bad = w.peakDepth <= 1 || w.W > span;
+      c.fillStyle = bad ? '#8c959f' : css('--pkt');
+      c.beginPath(); c.arc(X(w.W), Y(w.peak), bad ? 3 : 4.5, 0, 7); c.fill();
+    }
+  }
+  function stop(){ running = false; btn.textContent = '▶ 开始'; cancelAnimationFrame(raf); }
+  function loop(ts){
+    if (!prevReal) prevReal = ts;
+    const dt = Math.min(60, ts - prevReal); prevReal = ts;
+    acc += dt;
+    const k = Math.max(1, Math.round(acc/18)); acc = 0;
+    for (let i = 0; i < k; i++) stepOne();
+    readout(); paint();
+    if (st.i >= st.pkts.length){ stop(); return; }
+    raf = requestAnimationFrame(loop);
+  }
+  btn.addEventListener('click', ()=>{
+    if (running){ stop(); return; }
+    if (st.i >= st.pkts.length) reset();
+    running = true; btn.textContent = '⏸ 暂停'; prevReal = 0;
+    raf = requestAnimationFrame(loop);
+  });
+  document.getElementById('d5-reset').addEventListener('click', ()=>{ stop(); reset(); });
+  [sR, sB].forEach(s=> s.addEventListener('input', ()=>{ syncLab(); stop(); reset(); }));
+  window.addEventListener('resize', ()=> paint());
+  syncLab(); reset();
+})();
+
+/* ============ 演示 6: 两道过滤 ============ */
+(function(){
+  const cv = document.getElementById('d6-cv');
+  const btn = document.getElementById('d6-run');
+  const sN = document.getElementById('d6-n');
+  const f1 = document.getElementById('d6-f1'), f2 = document.getElementById('d6-f2');
+  const roS = document.getElementById('d6-ro-span'), roN = document.getElementById('d6-ro-n');
+  const roFR = document.getElementById('d6-ro-fr'), roFB = document.getElementById('d6-ro-fb');
+  let raf = 0, running = false, prevReal = 0, acc = 0, st;
+
+  const R0 = 8, B0 = 800;
+  const WS = geoBands(10, 10000, 8);                 // 默认等比 8 档
+  const ALL = genStream({R:R0, B:B0, len:128, iv:14, n:700, jitter:true, seed:5});
+
+  function calc(){
+    const r = runBands(WS, ALL, +sN.value);
+    const s = sieve(r.wins, r.span, f1.checked, f2.checked);
+    st = {wins:r.wins, span:r.span, sel:s.sel, rej:s.rej, fit:fitOf(s.sel)};
+  }
+  function syncLab(){ document.getElementById('d6-nv').textContent = sN.value; }
+  function render(){ calc(); readout(); paint(); }
+  function readout(){
+    setRo(roS, fmt(st.span,0) + ' us');
+    setRo(roN, st.sel.length, st.sel.length >= 2 ? 'ok' : 'bad');
+    if (!st.fit){ setRo(roFR, 'fit_n=0', 'bad'); setRo(roFB, 'fit_n=0', 'bad'); return; }
+    const eR = errPct(st.fit.R, R0), eB = errPct(st.fit.B, B0);
+    setRo(roFR, fmt(st.fit.R,2) + '  (' + sgn(eR,1) + '%)', Math.abs(eR) < 8 ? 'ok' : 'bad');
+    setRo(roFB, fmt(st.fit.B,0) + '  (' + sgn(eB,1) + '%)', Math.abs(eB) < 20 ? 'ok' : 'bad');
+  }
+  function paint(){
+    const H = 270, c = fitCanvas(cv, H), W = CW(cv);
+    const L = 66, Rr = W - 16, T = 14, Bt = H - 30;
+    c.clearRect(0,0,W,H);
+    const lg = Math.log(10), hg = Math.log(10000);
+    const X = w => L + (Math.log(Math.max(w,10)) - lg)/(hg - lg)*(Rr-L);
+    const ymax = Math.max(...st.wins.map(w=> w.peak), 1) * 1.08;
+    const Y = y => Bt - (y/ymax)*(Bt-T);
+    c.strokeStyle = css('--line'); c.lineWidth = 1;
+    c.beginPath(); c.moveTo(L+.5,T); c.lineTo(L+.5,Bt+.5); c.lineTo(Rr,Bt+.5); c.stroke();
+    label(c, 'peak (B)', L - 8, T + 6, css('--muted'), 'right');
+    label(c, 'W (us, 对数轴)', Rr, Bt + 18, css('--muted'), 'right');
+    for (const w of WS) label(c, fmt(w,0), X(w), Bt + 18, css('--muted'), 'center', 10);
+    // span 竖线
+    if (st.span >= 10 && st.span <= 10000){
+      c.strokeStyle = css('--win'); c.lineWidth = 2; c.setLineDash([4,4]);
+      c.beginPath(); c.moveTo(X(st.span), T); c.lineTo(X(st.span), Bt); c.stroke();
+      c.setLineDash([]);
+      label(c, 'span', X(st.span) + 5, T + 6, css('--win'), 'left', 11);
+    }
+    // 拟合线（线性关系画在对数轴上 → 曲线，逐点采样）
+    if (st.fit){
+      c.strokeStyle = css('--peak'); c.lineWidth = 2;
+      c.beginPath();
+      for (let i = 0; i <= 60; i++){
+        const w = Math.exp(lg + (hg-lg)*i/60);
+        const y = st.fit.R*w + st.fit.B;
+        const px = X(w), py = Y(Math.min(y, ymax));
+        i ? c.lineTo(px,py) : c.moveTo(px,py);
+      }
+      c.stroke();
+    }
+    // 点
+    for (const w of st.wins){
+      const bad = st.rej.indexOf(w) >= 0;
+      c.fillStyle = bad ? '#8c959f' : css('--pkt');
+      c.beginPath(); c.arc(X(w.W), Y(w.peak), bad ? 3.2 : 5, 0, 7); c.fill();
+      if (bad)
+        label(c, w.peakDepth <= 1 ? 'd=' + w.peakDepth : 'W>span',
+              X(w.W), Y(w.peak) - 11, '#8c959f', 'center', 10);
+    }
+  }
+  function stop(){ running = false; btn.textContent = '▶ 延长采样'; cancelAnimationFrame(raf); }
+  function loop(ts){
+    if (!prevReal) prevReal = ts;
+    const dt = Math.min(60, ts - prevReal); prevReal = ts;
+    acc += dt;
+    if (acc > 70){
+      acc = 0;
+      const v = Math.min(+sN.max, +sN.value + 10);
+      sN.value = v; syncLab(); render();
+      if (v >= +sN.max){ stop(); return; }
+    }
+    raf = requestAnimationFrame(loop);
+  }
+  btn.addEventListener('click', ()=>{
+    if (running){ stop(); return; }
+    if (+sN.value >= +sN.max){ sN.value = sN.min; syncLab(); render(); }
+    running = true; btn.textContent = '⏸ 暂停'; prevReal = 0;
+    raf = requestAnimationFrame(loop);
+  });
+  document.getElementById('d6-reset').addEventListener('click', ()=>{
+    stop(); sN.value = 60; f1.checked = true; f2.checked = true; syncLab(); render();
+  });
+  sN.addEventListener('input', ()=>{ stop(); syncLab(); render(); });
+  [f1, f2].forEach(x=> x.addEventListener('change', render));
+  window.addEventListener('resize', ()=> paint());
+  syncLab(); render();
+})();
+
+/* ============ 演示 7: 等比 vs 等差 ============ */
+(function(){
+  const cv = document.getElementById('d7-cv');
+  const btn = document.getElementById('d7-run');
+  const sR = document.getElementById('d7-r'), sB = document.getElementById('d7-b');
+  const roWk = document.getElementById('d7-ro-wk');
+  const roG = document.getElementById('d7-ro-g'), roGe = document.getElementById('d7-ro-ge');
+  const roL = document.getElementById('d7-ro-l'), roLe = document.getElementById('d7-ro-le');
+  let raf = 0, running = false, prevReal = 0, acc = 0, st;
+
+  const GEO = geoBands(10, 10000, 8);
+  const LIN = linBands(10, 10000, 8);
+  function syncLab(){
+    document.getElementById('d7-rv').textContent = sR.value + ' B/us';
+    document.getElementById('d7-bv').textContent = sB.value + ' B';
+  }
+  function calc(){
+    const R = +sR.value, B = +sB.value;
+    const pkts = genStream({R:R, B:B, len:128, iv:14, n:700, jitter:true, seed:5});
+    const g = runBands(GEO, pkts), l = runBands(LIN, pkts);
+    const gs = sieve(g.wins, g.span, true, true), ls = sieve(l.wins, l.span, true, true);
+    st = {R:R, B:B, span:g.span, knee:B/R,
+          g:{w:g.wins, sel:gs.sel, rej:gs.rej, fit:fitOf(gs.sel)},
+          l:{w:l.wins, sel:ls.sel, rej:ls.rej, fit:fitOf(ls.sel)}};
+  }
+  function one(ro, roe, d){
+    if (!d.fit){ setRo(ro, 'fit_n=' + d.sel.length, 'bad'); setRo(roe, '无法拟合', 'bad'); return; }
+    const e = errPct(d.fit.R, st.R);
+    setRo(ro, fmt(d.fit.R,2) + '  /  ' + d.sel.length + ' 点');
+    setRo(roe, sgn(e,1) + ' %', Math.abs(e) < 8 ? 'ok' : 'bad');
+  }
+  function readout(){
+    setRo(roWk, fmt(st.knee,0) + ' us');
+    one(roG, roGe, st.g);
+    one(roL, roLe, st.l);
+  }
+  function paint(){
+    const H = 180, c = fitCanvas(cv, H), W = CW(cv);
+    const L = 76, Rr = W - 20;
+    c.clearRect(0,0,W,H);
+    const lg = Math.log(10), hg = Math.log(10000);
+    const X = w => L + (Math.log(Math.max(w,10)) - lg)/(hg - lg)*(Rr-L);
+    // 轴
+    [1,2,3,4].forEach(e=>{
+      const w = Math.pow(10,e);
+      const x = X(w);
+      hline(c, x, x, 0, css('--line'));
+      c.strokeStyle = css('--line'); c.lineWidth = 1;
+      c.beginPath(); c.moveTo(x+.5, 28); c.lineTo(x+.5, 150); c.stroke();
+      label(c, fmt(w,0) + 'us', x, 164, css('--muted'), 'center', 10);
+    });
+    // 拐点
+    if (st.knee >= 10 && st.knee <= 10000){
+      c.strokeStyle = css('--win'); c.lineWidth = 2;
+      c.beginPath(); c.moveTo(X(st.knee), 22); c.lineTo(X(st.knee), 150); c.stroke();
+      label(c, 'W*=B/R=' + fmt(st.knee,0) + 'us', X(st.knee) + 6, 16, css('--win'), 'left', 11);
+    }
+    const rows = [{k:'等比', d:st.g, y:58,  col:css('--pkt')},
+                  {k:'等差', d:st.l, y:116, col:css('--wait')}];
+    for (const r of rows){
+      label(c, r.k, L - 10, r.y, css('--fg'), 'right', 13);
+      hline(c, L, Rr, r.y, css('--line'));
+      for (const w of r.d.w){
+        const bad = r.d.rej.indexOf(w) >= 0;
+        c.fillStyle = bad ? '#8c959f' : r.col;
+        c.beginPath(); c.arc(X(w.W), r.y, bad ? 3.5 : 6, 0, 7); c.fill();
+      }
+      // 拐点左侧的入选点数
+      const nl = r.d.sel.filter(w=> w.W <= st.knee).length;
+      label(c, '拐点左侧 ' + nl + ' 点', Rr, r.y - 16, nl >= 2 ? css('--muted') : css('--bad-line'), 'right', 11);
+    }
+  }
+  function stop(){ running = false; btn.textContent = '▶ 扫描 B'; cancelAnimationFrame(raf); }
+  function loop(ts){
+    if (!prevReal) prevReal = ts;
+    const dt = Math.min(60, ts - prevReal); prevReal = ts;
+    acc += dt;
+    if (acc > 130){
+      acc = 0;
+      const v = +sB.value + 200;
+      if (v > +sB.max){ stop(); return; }
+      sB.value = v; syncLab(); calc(); readout(); paint();
+    }
+    raf = requestAnimationFrame(loop);
+  }
+  btn.addEventListener('click', ()=>{
+    if (running){ stop(); return; }
+    if (+sB.value >= +sB.max){ sB.value = sB.min; syncLab(); calc(); readout(); paint(); }
+    running = true; btn.textContent = '⏸ 暂停'; prevReal = 0;
+    raf = requestAnimationFrame(loop);
+  });
+  document.getElementById('d7-reset').addEventListener('click', ()=>{
+    stop(); sB.value = 800; sR.value = 8; syncLab(); calc(); readout(); paint();
+  });
+  [sR, sB].forEach(s=> s.addEventListener('input', ()=>{ stop(); syncLab(); calc(); readout(); paint(); }));
+  window.addEventListener('resize', ()=> paint());
+  syncLab(); calc(); readout(); paint();
+})();
+
+/* ============ 侧边导航 ============ */
+(function(){
+  const nav = document.getElementById('nav');
+  const tgl = document.getElementById('nav-toggle');
+  tgl.addEventListener('click', ()=> nav.classList.toggle('open'));
+  nav.addEventListener('click', e=>{ if (e.target.tagName === 'A') nav.classList.remove('open'); });
+  const links = [...nav.querySelectorAll('a')];
+  const secs  = links.map(a=> document.getElementById(a.getAttribute('href').slice(1))).filter(Boolean);
+  function onScroll(){
+    let idx = 0;
+    secs.forEach((s,i)=>{ if (s.getBoundingClientRect().top < 120) idx = i; });
+    links.forEach((a,i)=> a.classList.toggle('active', i === idx));
+  }
+  window.addEventListener('scroll', onScroll, {passive:true});
+  onScroll();
+})();
+</script>
+</body>
+</html>
