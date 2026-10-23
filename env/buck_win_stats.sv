@@ -12,14 +12,22 @@
 //     平均速率不在此处重复计算, 需要时看 monitor。
 //
 //     窗口的两种初始化方式(build_phase 读 config_db, 二者取一):
-//       1. 自动分段 "win_max_us" / "win_num": 给最大窗口宽度与分段个数,
-//          组件把它等分为 N 档: W_i = win_max_us * i / win_num  (i = 1..N)
-//          最窄一档即 win_max_us/win_num, 最宽一档就是 win_max_us
-//            uvm_config_db #(real)::set(this, "env.win_stats", "win_max_us", 1000.0);
+//       1. 自动分段 "win_min_us" / "win_max_us" / "win_num" / "win_log":
+//          在 [min, max] 之间取 N 档, win_log=1(默认)等比, =0 等差
+//            win_log=1: W_i = min * (max/min)^((i-1)/(N-1))
+//            win_log=0: W_i = min + (max-min)*(i-1)/(N-1)
+//            uvm_config_db #(real)::set(this, "env.win_stats", "win_min_us", 10.0);
+//            uvm_config_db #(real)::set(this, "env.win_stats", "win_max_us", 10000.0);
 //            uvm_config_db #(int) ::set(this, "env.win_stats", "win_num",    8);
-//          默认 win_max_us = 1000us, win_num = 8, 即 125/250/.../1000 us
+//          默认 10us ~ 10000us 等比 8 档, 即 10/27/72/193/518/1389/3728/10000 us
+//          档位之所以要横跨多个量级: 拐点 W* = B/R 在不同配置间本身就跨数量级,
+//          且截距 B 是从最窄一档外推回 W=0 得来的, 窄端太疏则截距不准
+//          win_log 是兼容开关而非调优旋钮: 等差只在"区间窄到一个量级以内"时
+//          才成立, 而收窄区间的前提是先知道拐点 B/R 在哪 —— 那正是待拟合的
+//          未知数。所以常规验证一律用默认等比, 不要按 case 去切; 要做局部精查
+//          请用下面的 win_us 显式列表
 //       2. 显式列表 "win_us": 直接给各段宽度(us), 元素个数即分段数;
-//          给了 win_us 则上面两项被忽略
+//          给了 win_us 则上面几项被忽略
 //            uvm_config_db #(buck_win_us_t)::set(this, "env.win_stats",
 //                                                "win_us", '{20.0, 100.0, 500.0});
 //     也可拿到句柄后在 end_of_elaboration_phase 直接改 win_us, 窗口到
@@ -147,9 +155,12 @@ class buck_win_stats extends uvm_subscriber #(buck_transaction);
     // 各段窗口宽度(us)。元素个数 = 分段数。非空则直接采用
     real win_us[$];
 
-    // win_us 为空时自动分段: 把 win_max_us 等分为 win_num 档
+    // win_us 为空时自动分段: 在 [win_min_us, win_max_us] 之间取 win_num 档
+    // win_log=1(默认) 等比分段, =0 等差分段
+    real win_min_us;
     real win_max_us;
     int  win_num;
+    bit  win_log;
 
     // 1=裁掉没有参考意义的行(depth<=1 以及宽于采样跨度的行)
     bit hide_noise;
@@ -190,8 +201,10 @@ class buck_win_stats extends uvm_subscriber #(buck_transaction);
 
     function new(string name = "buck_win_stats", uvm_component parent = null);
         super.new(name, parent);
-        win_max_us  = 1000.0;
-        win_num     = 8;        // 125 / 250 / ... / 1000 us
+        win_min_us  = 10.0;
+        win_max_us  = 10000.0;
+        win_num     = 8;        // 10 / 27 / 72 / 193 / 518 / 1389 / 3728 / 10000 us
+        win_log     = 1;        // 等比分段; 置 0 退回等差
         hide_noise  = 1;
         fit_file    = "win_fit.txt";
         chk_sigma    = 3.0;
@@ -228,10 +241,13 @@ class buck_win_stats extends uvm_subscriber #(buck_transaction);
             return;     // 显式列表优先, 自动分段参数不再读
         end
 
+        if (uvm_config_db #(real)::get(this, "", "win_min_us", r_val))
+            win_min_us = r_val;
         if (uvm_config_db #(real)::get(this, "", "win_max_us", r_val))
             win_max_us = r_val;
         if (uvm_config_db #(int)::get(this, "", "win_num", i_num))
             win_num = i_num;
+        void'(uvm_config_db #(bit)::get(this, "", "win_log", win_log));
     endfunction
 
     // 窗口在此建立, 故 win_us 最晚可在 end_of_elaboration_phase 改写
@@ -259,15 +275,44 @@ class buck_win_stats extends uvm_subscriber #(buck_transaction);
         `uvm_info("BUCK_WIN", $sformatf("%0d window(s) built", win.size()), UVM_HIGH)
     endfunction
 
-    // 把 win_max_us 等分为 win_num 档: W_i = win_max_us * i / win_num
+    // 在 [win_min_us, win_max_us] 之间取 win_num 档
+    //   win_log=1: 等比  W_i = min * (max/min)^((i-1)/(N-1))
+    //   win_log=0: 等差  W_i = min + (max-min)*(i-1)/(N-1)
+    // 默认走等比: 拟合要同时解出斜率 R 与截距 B, 而 B 是从最窄一档外推回
+    // W=0 得来的, 窄端的点必须够密才压得住外推误差。等差分段在对数轴上头重
+    // 脚轻(一半的点挤在最宽的那半个区间), 窄端只剩一个点, 截距方差被放大。
+    // 另外拐点 W* = B/R 在不同 case 间本身就跨数量级, 固定一个窄区间无法同时
+    // 覆盖, 档位必须横跨多个量级才能让每个 case 都既有拐点前的点也有拐点后的点。
     protected function void split_window();
+        real ratio;
+
         if (win_num <= 0)
             `uvm_fatal("BUCK_WIN", $sformatf("win_num = %0d, must be > 0", win_num))
         if (win_max_us <= 0.0)
             `uvm_fatal("BUCK_WIN", $sformatf("win_max_us = %.3f, must be > 0", win_max_us))
+        if (win_min_us <= 0.0)
+            `uvm_fatal("BUCK_WIN", $sformatf("win_min_us = %.3f, must be > 0", win_min_us))
+        if (win_min_us > win_max_us)
+            `uvm_fatal("BUCK_WIN", $sformatf("win_min_us = %.3f > win_max_us = %.3f",
+                                             win_min_us, win_max_us))
 
-        for (int i = 1; i <= win_num; i++)
-            win_us.push_back(win_max_us * real'(i) / real'(win_num));
+        if (win_num == 1) begin         // 只有一档时无从插值, 取最宽的
+            win_us.push_back(win_max_us);
+            return;
+        end
+
+        if (win_log) begin
+            // 等比: 公比开 N-1 次方, 用 exp/ln 实现 x^y
+            ratio = $exp($ln(win_max_us / win_min_us) / real'(win_num - 1));
+            win_us.push_back(win_min_us);
+            for (int i = 1; i < win_num; i++)
+                win_us.push_back(win_us[i-1] * ratio);
+        end
+        else begin
+            for (int i = 0; i < win_num; i++)
+                win_us.push_back(win_min_us +
+                                 (win_max_us - win_min_us) * real'(i) / real'(win_num - 1));
+        end
     endfunction
 
     // monitor 每聚出一个完整包就调一次
@@ -479,7 +524,7 @@ class buck_win_stats extends uvm_subscriber #(buck_transaction);
 
         if (n_bad == 0) begin
             `uvm_info("BUCK_WIN",
-                      $sformatf("outlier check passed: %0d pts, sigma = %.1f byte", fit_n, sig ma),
+                      $sformatf("outlier check passed: %0d pts, sigma = %.1f byte", fit_n, sigma),
                       UVM_LOW)
             return;
         end
