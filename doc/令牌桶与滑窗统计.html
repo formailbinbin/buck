@@ -794,10 +794,62 @@ return (tok &gt; cfg.bucket_size) ? cfg.bucket_size : tok;</code></pre>
 </tbody>
 </table>
 
-<p>所以组件把 <code>[0, win_max_us]</code> 等分成 <code>win_num</code> 档（<a href="#13-1">§13.1</a>），在<strong>一次仿真里同时维护这么多个滑窗</strong>，拿到的是曲线上一串点，再用最小二乘同时解出斜率与截距。</p>
+<p>所以组件在 <code>[win_min_us, win_max_us]</code> 之间取 <code>win_num</code> 档（<a href="#13-1">§13.1</a>），在<strong>一次仿真里同时维护这么多个滑窗</strong>，拿到的是曲线上一串点，再用最小二乘同时解出斜率与截距。</p>
+
+<h4>档位该怎么排：等比而非等差</h4>
+
+<p>有了多档之后还有一个容易被忽略的问题：<strong>这些档位在区间里怎么分布</strong>。直觉上等差最自然，但它对这个拟合问题是错的。两个理由：</p>
+
+<p><strong>① 截距靠最窄端的点支撑。</strong><code>B</code> 是直线外推回 <code>W = 0</code> 的截距，最窄一档离 0 多远、窄端的点有多密，直接决定 <code>fit_B</code> 的方差。等差分段在对数轴上是<strong>头重脚轻</strong>的 —— 以 125/250/…/1000us 为例，8 个点里有 4 个挤在 500~1000us 这半个区间，而窄端只有 125us 孤零零一个点，截距全靠它从 125us 外推回 0，杠杆臂长、误差被放大。</p>
+
+<p><strong>② 拐点位置本身就跨数量级。</strong>曲线的拐点在 <code>W* = B / R</code>（桶被灌满所需的时间），拐点之前截距主导、之后斜率主导，<strong>两边都要有点才解得准</strong>。而 <code>W*</code> 随配置变化极大，本工程六个 case 分别是：</p>
+
+<table>
+<thead><tr><th>case</th><th><code>R</code> (byte/us)</th><th><code>B</code> (byte)</th><th>拐点 <code>W* = B/R</code></th></tr></thead>
+<tbody>
+<tr><td><code>tc_buck_base</code> / <code>beatgap</code></td><td>10.0</td><td>1024</td><td>102 us</td></tr>
+<tr><td><code>tc_buck_pps</code></td><td>6.4</td><td>1024</td><td>160 us</td></tr>
+<tr><td><code>tc_buck_shared</code></td><td>4.0</td><td>1024</td><td>256 us</td></tr>
+<tr><td><code>tc_buck_rate</code></td><td>1.0</td><td>512</td><td>512 us</td></tr>
+<tr><td><code>tc_buck_burst</code></td><td>2.0</td><td>8192</td><td><strong>4096 us</strong></td></tr>
+</tbody>
+</table>
+
+<p>跨了 40 倍。任何一个固定的窄区间都不可能同时覆盖 —— 老的 125~1000us 对 <code>burst</code> 来说全部落在拐点<strong>之前</strong>（拐点 4096us 比最宽档还远 4 倍），那个 case 的斜率只能靠曲线上 21% 的变化量去撑。<strong>要让一套默认配置对所有 case 都够用，档位必须横跨多个量级，而在跨量级的区间里均匀布点就意味着等比。</strong></p>
+
+<div class="formula">等比：W<sub>i</sub> = W<sub>min</sub> · (W<sub>max</sub> / W<sub>min</sub>)<sup>(i−1)/(N−1)</sup>　　i = 1 … N</div>
+
+<p>默认取 <code>10us ~ 10000us</code> 共 8 档，即 <code>10 / 27 / 72 / 193 / 518 / 1389 / 3728 / 10000 us</code>，跨三个数量级。两端放宽是安全的：过窄的档会被 <code>peak_depth > 1</code> 滤掉，过宽的档会被 <code>W ≤ 采样跨度</code> 滤掉（<a href="#11-1">§11.1</a>），<strong>等于让组件自己从一个足够大的候选集里挑出有信息量的那几档</strong>。这也是为什么实测的参与拟合点数不再是固定 8，而是随 case 在 5~7 之间浮动。</p>
+
+<div class="good">
+<p><strong>实测效果</strong>（同一套激励，仅改分段方式）：最大误差从 2.58% 降到 1.04%，<strong>减半</strong>。改善最大的是 <code>tc_buck_rate</code>，<code>fit_R</code> 从 −2.58% 收到 <strong>−0.13%</strong> —— 它原先正是最差的一个，因为拐点 512us 落在老区间的中段，等差的点大半压在拐点之后。同时 <code>fit_B</code> 普遍更贴近真实桶深（<code>base</code> 的桶深利用率从 91% 升到 98%），窄端有了点之后截距不再靠长臂外推。完整对照见 <a href="#18">§18</a>。</p>
+</div>
+
+<h4>等比与等差怎么选：固定用等比</h4>
+
+<p><code>win_log = 0</code> 可退回等差分段（<a href="#13-1">§13.1</a>），但这<strong>不是一个需要你按场景去权衡的选项</strong> —— 等差只是在「区间窄到一个量级以内」这个前提下才成立的特例，而那个前提恰恰不成立。</p>
+
+<p>关键在于<strong>分段方式与区间宽度是绑死的</strong>。把默认区间 <code>[10, 10000]</code> 改成等差 8 档，步长是 <code>(10000 − 10) / 7 ≈ 1427us</code>，档位变成 <code>10 / 1437 / 2864 / … / 10000</code>。而上表六个 case 的拐点是 102 / 160 / 256 / 512 / 4096us —— 前四个 case 的拐点全部落进第一档与第二档之间的那段空白里，拐点前只剩 <code>10us</code> 孤零零一个点，还很可能被 <code>peak_depth &gt; 1</code> 滤掉。<strong>区间一旦跨量级，等差就自动失效。</strong></p>
+
+<div class="bad">
+<p>反过来，等差要有意义就必须把区间收窄到一个量级以内（比如旧的 125~1000us）。但凭什么收到那里？<strong>收窄的前提是事先知道拐点在哪，而拐点 <code>= B / R</code> —— 这正是待拟合的那两个未知数。</strong></p>
+<p>这就是整件事的闭环：拟合的前提是 <code>R</code>、<code>B</code> 未知；既然未知，就没有依据去挑那个窄区间；挑不了窄区间，就只能跨量级；跨了量级，就只能等比。</p>
+</div>
+
+<p>所以 <code>win_log</code> 是一个<strong>兼容开关，不是调优旋钮</strong>。它剩下的用途只有两个：</p>
+
+<table>
+<thead><tr><th>场景</th><th>怎么配</th></tr></thead>
+<tbody>
+<tr><td>常规验证，<code>R</code> / <code>B</code> 待反推</td><td><strong>等比</strong> —— 默认值，不用配</td></tr>
+<tr><td>已知 <code>R</code> / <code>B</code>，想在某个可疑宽度附近精查曲线形状</td><td>直接给 <code>win_us</code> 显式列表，比切等差更准</td></tr>
+<tr><td>复现旧回归基线做数据比对</td><td><code>win_log = 0</code></td></tr>
+<tr><td>手算核对或写文档（要「相邻差 ÷ 步长 = R」一眼可读）</td><td><code>win_log = 0</code>，如 <a href="#13-4">§13.4</a> 的报告样例</td></tr>
+</tbody>
+</table>
 
 <div class="note">
-<p>窗口档位要横跨多个量级才有意义。若所有档都远大于 <code>B/R</code>（即桶被灌满所需的时间），各点的截距分量都被压成噪声，<code>fit_B</code> 的数值就不可信了 —— 这类行会被 <code>hide_noise</code> 裁掉（<a href="#13-2">§13.2</a>）。</p>
+<p>注意第二行：真要做局部精细化，<strong>正解是 <code>win_us</code> 而不是等差</strong>。给了 <code>win_us</code>，上面四个自动分段参数全部被忽略（<a href="#13-1">§13.1</a>），档位想怎么排就怎么排，不必迁就等差那种均匀步长。</p>
 </div>
 
 <h3 id="8-4">8.4 次可加但不保证凹</h3>
@@ -1012,7 +1064,7 @@ return (tok &gt; cfg.bucket_size) ? cfg.bucket_size : tok;</code></pre>
 <div class="formula">∫ S(t) dt = Σ nbytes<sub>i</sub> · W = total_bytes · W<br>
 mean_rate = (total_bytes · W / span) / W = <strong>total_bytes / span</strong></div>
 
-<p><code>W</code> 被约掉了。所以不管窗口取 125us 还是 1000us，窗口内的平均速率一律等于全局平均 —— <strong>平均值这个统计量对窗口宽度完全不敏感</strong>，这也是组件只提供一个 <code>avg_Bps()</code> 的原因。</p>
+<p><code>W</code> 被约掉了。所以不管窗口取 10us 还是 10000us，窗口内的平均速率一律等于全局平均 —— <strong>平均值这个统计量对窗口宽度完全不敏感</strong>，这也是组件只提供一个 <code>avg_Bps()</code> 的原因。</p>
 
 <table>
 <thead><tr><th>统计量</th><th>随 W 变化</th><th>暴露什么</th></tr></thead>
@@ -1070,7 +1122,7 @@ mean_rate = (total_bytes · W / span) / W = <strong>total_bytes / span</strong><
 <p>相邻差恒为 <code>2000 byte / 200 us = 10 byte/us = R</code>；外推到 <code>W = 0</code> 得 <code>1024 = B</code>。<strong>截距正是整形器区别于纯限速器的全部内容</strong>，而平均速率对它一无所知。</p>
 
 <div class="note">
-<p>这也解释了分段为何选<strong>线性等分</strong>而非等比：等间距的 <code>W</code> 才方便做上面这个线性外推，读表时横轴刻度也均匀。</p>
+<p>上面用等间距的 <code>W</code> 只是为了让「相邻差恒定」一眼可读，<strong>这是手算演示的便利，不是分段的依据</strong>。真正拟合时用的是最小二乘（<a href="#11-2">§11.2</a>），它对横轴是否等间距毫不关心，而档位该怎么排另有讲究 —— 组件默认走<strong>等比</strong>，理由见 <a href="#8-3">§8.3</a>。</p>
 </div>
 
 <h3 id="11-2">11.2 最小二乘拟合：从实测曲线反推 R 与 B</h3>
@@ -1157,7 +1209,7 @@ mean_rate = (total_bytes · W / span) / W = <strong>total_bytes / span</strong><
 
 <p>九个点几乎严丝合缝地落在直线上，拟合出 <code>R = 2.0070</code>、<code>B = 8126.0</code>，与配置的 <code>R = 2</code>、<code>B = 8192</code> 误差均小于 1%。<strong>整个过程没有读任何配置寄存器，纯靠总线上采到的数据反推。</strong></p>
 
-<p>报告表尾多一行，文件 <code>win_fit.txt</code> 里还带每个点的残差：</p>
+<p>报告表尾多一行，文件 <code>win_fit.txt</code> 里还带每个点的残差（这组样例用的是一套显式指定的等差档位，见 <a href="#13-1">§13.1</a> 的 <code>win_us</code>，不是默认的等比档位）：</p>
 
 <div class="diagram">  fit(9 pts): R = 2.0070 byte/us,  B = 8126.0 byte
 
@@ -1238,29 +1290,29 @@ endfunction</code></pre>
 
 <p>默认口径是「1 令牌 = 1 byte」，所以 <code>byte/us = (token/s) / 1e6</code>。<code>tc_buck_pps</code> 的令牌单位是「包」而非「字节」，而滑窗统计的是字节，需乘定长包长换算：<code>100 Kpps × 64 byte = 6.4 byte/us</code>。</p>
 
-<p>六个 case 的实测拟合值与配置值的偏差：</p>
+<p>六个 case 的实测拟合值与配置值的偏差（等比分段 10~10000us 8 档，见 <a href="#8-3">§8.3</a>；<code>点数</code>是过完两道过滤后真正参与拟合的档数）：</p>
 
 <table>
-<thead><tr><th>case</th><th>配置 R</th><th>fit_R</th><th>R 误差</th><th>桶深 B</th><th>fit_B</th><th>fit_B / B</th></tr></thead>
+<thead><tr><th>case</th><th>配置 R</th><th>fit_R</th><th>R 误差</th><th>点数</th><th>桶深 B</th><th>fit_B</th><th>fit_B / B</th></tr></thead>
 <tbody>
-<tr><td><code>tc_buck_base</code></td><td>10.0</td><td>10.0343</td><td>+0.34%</td><td>1024</td><td>929.5</td><td>91%</td></tr>
-<tr><td><code>tc_buck_rate</code></td><td>1.0</td><td>0.9742</td><td>-2.6%</td><td>512</td><td>244.1</td><td>48%</td></tr>
-<tr><td><code>tc_buck_burst</code></td><td>2.0</td><td>1.9897</td><td>-0.5%</td><td>8192</td><td>8082.0</td><td><strong>99%</strong></td></tr>
-<tr><td><code>tc_buck_pps</code></td><td>6.4</td><td>6.3878</td><td>-0.19%</td><td>1024</td><td>22.9</td><td>2%</td></tr>
-<tr><td><code>tc_buck_shared</code></td><td>4.0</td><td>4.0068</td><td>+0.17%</td><td>1024</td><td>229.1</td><td>22%</td></tr>
-<tr><td><code>tc_buck_beatgap</code></td><td>10.0</td><td>9.9955</td><td>-0.04%</td><td>1024</td><td>246.6</td><td>24%</td></tr>
+<tr><td><code>tc_buck_base</code></td><td>10.0</td><td>9.8987</td><td>-1.01%</td><td>6</td><td>1024</td><td>1001.6</td><td>98%</td></tr>
+<tr><td><code>tc_buck_rate</code></td><td>1.0</td><td>0.9987</td><td>-0.13%</td><td>7</td><td>512</td><td>234.5</td><td>46%</td></tr>
+<tr><td><code>tc_buck_burst</code></td><td>2.0</td><td>2.0084</td><td>+0.42%</td><td>7</td><td>8192</td><td>8132.3</td><td><strong>99%</strong></td></tr>
+<tr><td><code>tc_buck_pps</code></td><td>6.4</td><td>6.3732</td><td>-1.04%</td><td>5</td><td>1024</td><td>38.3</td><td>4%</td></tr>
+<tr><td><code>tc_buck_shared</code></td><td>4.0</td><td>3.9988</td><td>-0.03%</td><td>7</td><td>1024</td><td>234.0</td><td>23%</td></tr>
+<tr><td><code>tc_buck_beatgap</code></td><td>10.0</td><td>9.9922</td><td>-0.08%</td><td>6</td><td>1024</td><td>247.4</td><td>24%</td></tr>
 </tbody>
 </table>
 
 <p>最后一列全部 <code>≤ 100%</code> —— 这正是契约要求的，<code>fit_B</code> 从不越界。注意这一列<strong>不是误差</strong>，而是「桶深的利用率」：</p>
 
 <div class="note">
-<p>拟合截距 <code>fit_B</code> 量的是<strong>实际观测到的最大突发</strong>，不是配置的 <code>bucket_size</code>。<code>tc_buck_burst</code> 是 <code>init_tokens = -1</code> 开场满桶、一上来就把 8KB 信用全部花掉，所以截距几乎顶到桶深（99%）；其余 case 要么 <code>init_tokens = 0</code> 空桶起步，要么包间隔本就比令牌补充慢，突发信用从未攒满，<code>fit_B</code> 自然退化成「几个包长」的量级。<code>tc_buck_pps</code> 最极端 —— 桶深按「包」算只有 16 个令牌，换成字节与 1024 根本不是一回事。</p>
+<p>拟合截距 <code>fit_B</code> 量的是<strong>实际观测到的最大突发</strong>，不是配置的 <code>bucket_size</code>。<code>tc_buck_burst</code> 与 <code>tc_buck_base</code> 都是 <code>init_tokens = -1</code> 开场满桶、一上来就把信用全部花掉，所以截距几乎顶到桶深（99% / 98%）；其余 case 要么 <code>init_tokens = 0</code> 空桶起步，要么包间隔本就比令牌补充慢，突发信用从未攒满，<code>fit_B</code> 自然退化成「几个包长」的量级。<code>tc_buck_pps</code> 最极端 —— 桶深按「包」算只有 16 个令牌，换成字节与 1024 根本不是一回事。</p>
 </div>
 
 <div class="good"><strong>为什么只有 <code>tc_buck_burst</code> 显式配了 <code>exp_B</code></strong><br>
-由于 <code>exp_B</code> 是<strong>单侧上界</strong>判定（<a href="#12-2">§12.2</a>），给其余 case 也配上并不会误报 —— 利用率只有 2% 的 <code>tc_buck_pps</code> 一样能通过。<br><br>
-但在这些 case 上配 <code>exp_B</code> 几乎<strong>没有检出力</strong>：实测值离上界还差一个数量级，整形器得漏到 40 倍以上才会触发，而那种程度的漏速 <code>exp_R</code> 早就报了。只有 <code>tc_buck_burst</code> 把突发信用真正用光，<code>fit_B</code> 贴着上界，此时上界判定才是一道<strong>紧</strong>的检查 —— 桶深多给一点点就能抓到。<br><br>
+由于 <code>exp_B</code> 是<strong>单侧上界</strong>判定（<a href="#12-2">§12.2</a>），给其余 case 也配上并不会误报 —— 利用率只有 4% 的 <code>tc_buck_pps</code> 一样能通过。<br><br>
+但在这些 case 上配 <code>exp_B</code> 几乎<strong>没有检出力</strong>：实测值离上界还差一个数量级，整形器得漏到 20 倍以上才会触发，而那种程度的漏速 <code>exp_R</code> 早就报了。只有 <code>tc_buck_burst</code>（以及顺带把桶用满的 <code>tc_buck_base</code>）把突发信用真正用光，<code>fit_B</code> 贴着上界，此时上界判定才是一道<strong>紧</strong>的检查 —— 桶深多给一点点就能抓到。<br><br>
 所以这里的取舍不是「怕误报」，而是<strong>把检查放在它有分辨力的地方</strong>。桶深是否被突破另有 <a href="#7-8"><code>is_conformant()</code></a> 在桶内部逐包把关，不需要契约比对代劳。</div>
 
 <h3 id="12-4">12.4 两道的分工</h3>
@@ -1284,7 +1336,7 @@ endfunction</code></pre>
 
 <h3 id="12-5">12.5 一个抓不到的形状：低端被抬高</h3>
 
-<p>下面是一组低端被抬高的数据（<code>W</code> 均匀 8 档，真值 <code>R = 10 byte/us</code>、<code>B = 1024</code>）：</p>
+<p>下面是一组低端被抬高的数据（为了让相邻差一眼可读，这里人为取 <code>W</code> 均匀 8 档，与组件默认的等比分段无关；真值 <code>R = 10 byte/us</code>、<code>B = 1024</code>）：</p>
 
 <table>
 <thead><tr><th>W (us)</th><th>125</th><th>250</th><th>375</th><th>500</th><th>625</th><th>750</th><th>875</th><th>1000</th></tr></thead>
@@ -1308,18 +1360,24 @@ endfunction</code></pre>
 
 <p>两种方式，在 <code>build_phase</code> 读 <code>config_db</code>，二者取一。</p>
 
-<p><strong>① 自动分段</strong> —— 给最大宽度与分段个数，组件等分为 N 档 <code>W_i = win_max_us · i / win_num</code>：</p>
+<p><strong>① 自动分段</strong> —— 给区间端点与档数，组件在 <code>[win_min_us, win_max_us]</code> 之间取 N 档。<code>win_log = 1</code>（默认）<strong>等比</strong>，<code>= 0</code> 等差：</p>
 
-<pre><code>uvm_config_db #(real)::set(this, "env.win_stats", "win_max_us", 1000.0);
+<div class="formula">等比：W<sub>i</sub> = W<sub>min</sub> · (W<sub>max</sub> / W<sub>min</sub>)<sup>(i−1)/(N−1)</sup><br>
+等差：W<sub>i</sub> = W<sub>min</sub> + (W<sub>max</sub> − W<sub>min</sub>) · (i−1)/(N−1)</div>
+
+<pre><code>uvm_config_db #(real)::set(this, "env.win_stats", "win_min_us", 10.0);
+uvm_config_db #(real)::set(this, "env.win_stats", "win_max_us", 10000.0);
 uvm_config_db #(int) ::set(this, "env.win_stats", "win_num",    8);
-// → 125 / 250 / 375 / 500 / 625 / 750 / 875 / 1000 us</code></pre>
+// → 10 / 27 / 72 / 193 / 518 / 1389 / 3728 / 10000 us</code></pre>
 
-<p><strong>② 显式列表</strong> —— 直接给各档宽度，元素个数即分段数；给了它则 ① 的两项被忽略：</p>
+<p>默认就是上面这组：<code>win_min_us = 10us</code>、<code>win_max_us = 10000us</code>、<code>win_num = 8</code>、<code>win_log = 1</code>，跨三个数量级。<strong>默认走等比而非等差，理由见 <a href="#8-3">§8.3</a></strong> —— 截距要靠窄端的点支撑，而拐点 <code>B/R</code> 在不同配置间跨 40 倍，固定窄区间盖不住。<code>win_log</code> 是兼容开关而非调优旋钮，<strong>常规验证一律用默认的等比，不要按 case 去切</strong>（选型判据见 <a href="#8-3">§8.3</a> 末）。</p>
+
+<p><strong>② 显式列表</strong> —— 直接给各档宽度，元素个数即分段数；给了它则 ① 的四项全部被忽略。要在某个可疑宽度附近做局部精查，<strong>用这个而不是切等差</strong>：</p>
 
 <pre><code>uvm_config_db #(buck_win_us_t)::set(this, "env.win_stats",
                                     "win_us", '{20.0, 100.0, 500.0});</code></pre>
 
-<p>窗口到 <code>start_of_simulation_phase</code> 才真正建立，所以也可以拿到句柄后在 <code>end_of_elaboration_phase</code> 直接改 <code>win_us</code>。默认值是 <code>win_max_us = 1000us</code>、<code>win_num = 8</code>。</p>
+<p>窗口到 <code>start_of_simulation_phase</code> 才真正建立，所以也可以拿到句柄后在 <code>end_of_elaboration_phase</code> 直接改 <code>win_us</code>。</p>
 
 <h3 id="13-2">13.2 两类被裁掉的行</h3>
 
@@ -1350,6 +1408,8 @@ uvm_config_db #(int) ::set(this, "env.win_stats", "win_num",    8);
 </div>
 
 <h3 id="13-4">13.4 报告样例</h3>
+
+<p>下面这份是用等差档位（125us 步进）跑出来的，便于看「相邻行差值趋近 <code>R</code>」这件事；默认的等比档位结构相同，只是 <code>W</code> 列换成 10/27/72/… 的等比序列。</p>
 
 <div class="diagram">---------------- sliding window traffic profile ----------------
   packets   = 200,  total = 28137 byte
@@ -1438,7 +1498,7 @@ last  ────────────────────────�
 <tr><td>monitor / DUT 计数</td><td>否</td><td>二者都只在 <code>valid &amp;&amp; ready</code> 成立时动作，空闲拍被天然忽略</td></tr>
 <tr><td>符合性 <a href="#7-8"><code>is_conformant()</code></a></td><td>否</td><td>不依赖窗口口径，任何情形下严格成立</td></tr>
 <tr><td>raw / steady 速率（<a href="#5">§5</a>）</td><td>小空隙可忽略</td><td>线速 4 B/2 ns = 2e9 B/s，base case R=1e7 仅占 0.5%，每 beat 平均还有约 400 拍裕量；超出后 driver 成为瓶颈，窗口分母被拉长，两项指标都会偏低</td></tr>
-<tr><td>滑窗拟合（<a href="#11">§11</a>）</td><td>间接</td><td>包的到达时刻被推后，曲线整体右移、<code>fit_R</code> 略低；只要空隙远小于令牌间隔就在容差内（beatgap 实测 <code>fit_R = 9.9955</code>，偏 −0.04%）</td></tr>
+<tr><td>滑窗拟合（<a href="#11">§11</a>）</td><td>间接</td><td>包的到达时刻被推后，曲线整体右移、<code>fit_R</code> 略低；只要空隙远小于令牌间隔就在容差内（beatgap 实测 <code>fit_R = 9.9922</code>，偏 −0.08%）</td></tr>
 <tr><td>背压 / FIFO 水位覆盖</td><td><strong>是</strong></td><td>见下</td></tr>
 </tbody>
 </table>
@@ -1573,9 +1633,11 @@ make help                      # 查看可用 TC
 <table>
 <thead><tr><th>键</th><th>类型</th><th>默认</th><th>说明</th></tr></thead>
 <tbody>
-<tr><td><code>win_max_us</code></td><td>real</td><td>1000.0</td><td>自动分段的最大窗口宽度（<a href="#13-1">§13.1</a>）</td></tr>
+<tr><td><code>win_min_us</code></td><td>real</td><td>10.0</td><td>自动分段的最小窗口宽度（<a href="#13-1">§13.1</a>）</td></tr>
+<tr><td><code>win_max_us</code></td><td>real</td><td>10000.0</td><td>自动分段的最大窗口宽度</td></tr>
 <tr><td><code>win_num</code></td><td>int</td><td>8</td><td>自动分段的档数</td></tr>
-<tr><td><code>win_us</code></td><td>buck_win_us_t</td><td>—</td><td>显式档位列表，给了则上两项被忽略</td></tr>
+<tr><td><code>win_log</code></td><td>bit</td><td>1</td><td>1=等比分段（推荐，见 <a href="#8-3">§8.3</a>），0=等差</td></tr>
+<tr><td><code>win_us</code></td><td>buck_win_us_t</td><td>—</td><td>显式档位列表，给了则上四项被忽略</td></tr>
 <tr><td><code>hide_noise</code></td><td>bit</td><td>1</td><td>裁掉太窄（<code>depth &lt;= 1</code>）与太宽（<code>W &gt; span</code>）的行（<a href="#13-2">§13.2</a>）</td></tr>
 <tr><td><code>fit_file</code></td><td>string</td><td>win_fit.txt</td><td>残差明细落盘文件名，置空则不写</td></tr>
 <tr><td><code>chk_sigma</code></td><td>real</td><td>3.0</td><td>残差离群门限（倍标准差），只判正偏差（<a href="#12-1">§12.1</a>）</td></tr>
@@ -1708,22 +1770,23 @@ buck_driver::type_id::set_type_override(my_gap_driver::get_type());</code></pre>
 
 <h4>第二部分：滑窗反推</h4>
 
-<p>8 个窗口档位的拟合结果，与配置值对照（<code>exp_tol = 5%</code>）：</p>
+<p>窗口档位按等比分段取 10~10000us 共 8 档（<a href="#8-3">§8.3</a>），经 <code>peak_depth &gt; 1</code> 与 <code>W ≤ span</code> 两道过滤后实际参与拟合 5~7 档，与配置值对照（<code>exp_tol = 5%</code>）：</p>
 
 <table>
-<thead><tr><th>testcase</th><th>exp_R</th><th>fit_R</th><th>R 偏差</th><th>exp_B</th><th>fit_B</th><th>fit_B / 桶深</th><th>离群检查</th></tr></thead>
+<thead><tr><th>testcase</th><th>exp_R</th><th>fit_R</th><th>R 偏差</th><th>点数</th><th>exp_B</th><th>fit_B</th><th>fit_B / 桶深</th><th>离群检查</th></tr></thead>
 <tbody>
-<tr><td><code>tc_buck_base</code></td><td class="num">10.0</td><td class="num">10.0343</td><td class="num">+0.34%</td><td>不比</td><td class="num">929.5</td><td class="num">91%</td><td>passed</td></tr>
-<tr><td><code>tc_buck_rate</code></td><td class="num">1.0</td><td class="num">0.9742</td><td class="num">−2.58%</td><td>不比</td><td class="num">244.1</td><td class="num">48%</td><td>passed</td></tr>
-<tr><td><code>tc_buck_burst</code></td><td class="num">2.0</td><td class="num">1.9897</td><td class="num">−0.52%</td><td class="num">8192</td><td class="num">8082.0</td><td class="num"><strong>99%</strong></td><td>passed</td></tr>
-<tr><td><code>tc_buck_pps</code></td><td class="num">6.4</td><td class="num">6.3878</td><td class="num">−0.19%</td><td>不比</td><td class="num">22.9</td><td class="num">2%</td><td>passed</td></tr>
-<tr><td><code>tc_buck_shared</code></td><td class="num">4.0</td><td class="num">4.0068</td><td class="num">+0.17%</td><td>不比</td><td class="num">229.1</td><td class="num">22%</td><td>passed</td></tr>
-<tr><td><code>tc_buck_beatgap</code></td><td class="num">10.0</td><td class="num">9.9955</td><td class="num">−0.04%</td><td>不比</td><td class="num">246.6</td><td class="num">24%</td><td>passed</td></tr>
+<tr><td><code>tc_buck_base</code></td><td class="num">10.0</td><td class="num">9.8987</td><td class="num">−1.01%</td><td class="num">6</td><td>不比</td><td class="num">1001.6</td><td class="num">98%</td><td>passed</td></tr>
+<tr><td><code>tc_buck_rate</code></td><td class="num">1.0</td><td class="num">0.9987</td><td class="num">−0.13%</td><td class="num">7</td><td>不比</td><td class="num">234.5</td><td class="num">46%</td><td>passed</td></tr>
+<tr><td><code>tc_buck_burst</code></td><td class="num">2.0</td><td class="num">2.0084</td><td class="num">+0.42%</td><td class="num">7</td><td class="num">8192</td><td class="num">8132.3</td><td class="num"><strong>99%</strong></td><td>passed</td></tr>
+<tr><td><code>tc_buck_pps</code></td><td class="num">6.4</td><td class="num">6.3732</td><td class="num">−1.04%</td><td class="num">5</td><td>不比</td><td class="num">38.3</td><td class="num">4%</td><td>passed</td></tr>
+<tr><td><code>tc_buck_shared</code></td><td class="num">4.0</td><td class="num">3.9988</td><td class="num">−0.03%</td><td class="num">7</td><td>不比</td><td class="num">234.0</td><td class="num">23%</td><td>passed</td></tr>
+<tr><td><code>tc_buck_beatgap</code></td><td class="num">10.0</td><td class="num">9.9922</td><td class="num">−0.08%</td><td class="num">6</td><td>不比</td><td class="num">247.4</td><td class="num">24%</td><td>passed</td></tr>
 </tbody>
 </table>
 
 <div class="good">
-<p><code>fit_R</code> 六个 case 全部落在 ±2.6% 以内 —— <strong>完全不看整形参数、只看总线上的 beat，也能把配置速率反推出来</strong>，这是第二部分最有说服力的结果。末列是桶深利用率（全部 ≤ 100%，契约从未越界）：它说明 <code>fit_B</code> 量的是「实际发生的最大突发」而非桶深，只有 burst case 贴到 99%，上界比对在它身上才是紧的，所以只有它配了 <code>exp_B</code>（详见 <a href="#12-3">§12.3</a>）。</p>
+<p><code>fit_R</code> 六个 case 全部落在 <strong>±1.1%</strong> 以内 —— <strong>完全不看整形参数、只看总线上的 beat，也能把配置速率反推出来</strong>，这是第二部分最有说服力的结果。末列是桶深利用率（全部 ≤ 100%，契约从未越界）：它说明 <code>fit_B</code> 量的是「实际发生的最大突发」而非桶深，只有开场满桶的 burst / base 两个 case 贴到 98% 以上，上界比对在它们身上才是紧的，所以只有 burst 配了 <code>exp_B</code>（详见 <a href="#12-3">§12.3</a>）。</p>
+<p>换成等比分段前（125~1000us 等差 8 档），最差的 <code>tc_buck_rate</code> 偏 −2.58%，现在收到 −0.13%；<strong>全局最大误差由 2.58% 减半到 1.04%</strong>，见 <a href="#8-3">§8.3</a> 的对照。</p>
 </div>
 
 <h4>计数对账</h4>
@@ -1756,15 +1819,15 @@ buck_driver::type_id::set_type_override(my_gap_driver::get_type());</code></pre>
 <tr><td>beat / byte</td><td class="num">7106 / 28137</td><td class="num">7106 / 28137</td><td><strong>逐位相同</strong> —— monitor 与 DUT 对空隙免疫</td></tr>
 <tr><td>仿真时长</td><td class="num">2.712 ms</td><td class="num">2.815 ms</td><td>+3.8%，空隙只占总时长的零头</td></tr>
 <tr><td>raw 误差</td><td class="num">3.78%</td><td class="num">0.89%</td><td>窗口变长，<code>B/(R·T)</code> 这一项被摊薄</td></tr>
-<tr><td>fit_R</td><td class="num">10.0343</td><td class="num">9.9955</td><td>两条路都测到了 R；插隙让曲线略微右移，拟合值反而更贴近 10</td></tr>
-<tr><td>fit_B</td><td class="num">929.5</td><td class="num">246.6</td><td><strong>差 3.8 倍</strong> —— 与下面的 burst used 同源，滑窗如实反映了突发规模的差异</td></tr>
+<tr><td>fit_R</td><td class="num">9.8987</td><td class="num">9.9922</td><td>两条路都测到了 R；beatgap 略准一点 —— base 开场满桶的大突发把最窄几档的峰值抬了起来，连带把斜率压低了约 1%</td></tr>
+<tr><td>fit_B</td><td class="num">1001.6</td><td class="num">247.4</td><td><strong>差 4.05 倍</strong> —— 与下面的 burst used 同源，滑窗如实反映了突发规模的差异</td></tr>
 <tr><td>burst used</td><td class="num">1024</td><td class="num">256</td><td>空隙期间桶在补令牌，开场的突发信用没被一次性用光</td></tr>
 <tr><td>conformant</td><td>YES</td><td>YES</td><td>上界始终未被突破</td></tr>
 </tbody>
 </table>
 
 <div class="good">
-<p>这一行对照正好印证了两条分支的独立价值：<code>burst used</code> 来自桶的内部状态，<code>fit_B</code> 来自总线观测，两者互不知情却给出一致的结论（1024 vs 256 ≈ 929 vs 247）。这种交叉一致性是单看任一条线都拿不到的。</p>
+<p>这一行对照正好印证了两条分支的独立价值：<code>burst used</code> 来自桶的内部状态，<code>fit_B</code> 来自总线观测，两者互不知情却给出一致的结论（1024 vs 256 ≈ 1002 vs 247）。这种交叉一致性是单看任一条线都拿不到的。</p>
 </div>
 
 <h2 id="19">19. 已知限制</h2>
