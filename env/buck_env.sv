@@ -38,6 +38,7 @@ endclass: buck_agent
 class buck_env extends uvm_env;
 
     buck_agent       agent;
+    buck_win_stats   win_stats;
     token_bucket     bucket;
     token_bucket_cfg bkt_cfg;
 
@@ -49,7 +50,6 @@ class buck_env extends uvm_env;
 
     function void build_phase(uvm_phase phase);
         super.build_phase(phase);
-        agent = buck_agent::type_id::create("agent", this);
 
         // 若 test 没有注入配置, 用默认值兜底
         if (!uvm_config_db#(token_bucket_cfg)::get(this, "", "bkt_cfg", bkt_cfg)) begin
@@ -57,11 +57,19 @@ class buck_env extends uvm_env;
             `uvm_info("BUCK_ENV", "no bkt_cfg from config_db, use default", UVM_LOW)
         end
 
+        agent     = buck_agent::type_id::create("agent", this);
+        win_stats = buck_win_stats::type_id::create("win_stats", this);
+
         bucket = token_bucket::type_id::create("bucket");
         bucket.configure(bkt_cfg);
 
         // 发布到 config_db, 供 sequence 取用; 作用域覆盖 sequencer 下所有 sequence
         uvm_config_db#(token_bucket)::set(null, "*", "tb_bucket", bucket);
+    endfunction
+
+    function void connect_phase(uvm_phase phase);
+        super.connect_phase(phase);
+        agent.monitor.ap.connect(win_stats.analysis_export);
     endfunction
 
     function void report_phase(uvm_phase phase);
